@@ -118,6 +118,31 @@ def load_sign_base_url_from_env_file() -> str:
     return value.strip()
 
 
+def fetch_odoo_employee_phones(odoo: OdooClient, employee_ids: list[int]) -> dict[int, str]:
+    result: dict[int, str] = {}
+    if not employee_ids:
+        return result
+
+    fields_info = odoo.get_employee_fields()
+    candidate_fields = ["mobile_phone", "mobile", "work_phone", "phone"]
+    available_fields = [f for f in candidate_fields if f in fields_info]
+    if not available_fields:
+        return result
+
+    rows = odoo.read("hr.employee", employee_ids, ["id"] + available_fields)
+    for row in rows:
+        emp_id = int(row.get("id"))
+        phone_val = ""
+        for field_name in available_fields:
+            value = row.get(field_name)
+            if value:
+                phone_val = str(value).strip()
+                break
+        result[emp_id] = phone_val
+
+    return result
+
+
 def _save_signature_image(signature_image_data, out_path: Path) -> bytes:
     image = Image.fromarray(signature_image_data.astype("uint8"), mode="RGBA")
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -882,18 +907,7 @@ with st.expander("6) Solicitudes de firma movil", expanded=False):
                         for m in st.session_state.odoo_matches
                         if m.match_status == "MATCH_OK" and m.employee_id_odoo
                     ]
-                    if employee_ids:
-                        phone_fields = ["mobile_phone", "mobile", "work_phone", "phone"]
-                        employees_phone_data = odoo.read("hr.employee", employee_ids, phone_fields)
-                        for emp in employees_phone_data:
-                            emp_id = int(emp.get("id"))
-                            phone_val = ""
-                            for field_name in phone_fields:
-                                value = emp.get(field_name)
-                                if value:
-                                    phone_val = str(value).strip()
-                                    break
-                            odoo_phone_by_employee_id[emp_id] = phone_val
+                    odoo_phone_by_employee_id = fetch_odoo_employee_phones(odoo, employee_ids)
                 except Exception:
                     odoo_phone_by_employee_id = {}
 
@@ -905,10 +919,12 @@ with st.expander("6) Solicitudes de firma movil", expanded=False):
                     continue
                 row_map = mapping_by_worker.get(str(match.worker_number), {})
                 telefono = str(row_map.get("telefono") or row_map.get("movil") or "").strip()
+                origen_telefono = "excel"
                 if not telefono:
                     telefono = str(
                         odoo_phone_by_employee_id.get(int(match.employee_id_odoo), "")
                     ).strip()
+                    origen_telefono = "odoo" if telefono else "sin_dato"
                 original_path = originals_dir / match.filename
                 original_path.write_bytes(pdf_bytes)
                 token_value = create_token()
@@ -937,6 +953,7 @@ with st.expander("6) Solicitudes de firma movil", expanded=False):
                         "empleado": str(match.employee_name_odoo or ""),
                         "n_trabajador": str(match.worker_number),
                         "telefono": telefono,
+                        "origen_telefono": origen_telefono,
                         "link_firma": sign_link,
                         "whatsapp_link": wa_link,
                         "mensaje_whatsapp": wa_message,
