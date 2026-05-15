@@ -30,7 +30,12 @@ from core.odoo_export import (
 )
 from core.payroll_excel import parse_payroll_excel
 from core.payroll_pdf import extract_pdf_pages, split_pdf_to_zip
-from core.signature_delivery import build_sign_link, build_whatsapp_url, render_message
+from core.signature_delivery import (
+    build_sign_link,
+    build_whatsapp_url,
+    normalize_base_url,
+    render_message,
+)
 from core.signature_pdf import insert_signature_into_pdf
 from core.signature_repository import (
     add_event,
@@ -835,8 +840,13 @@ with st.expander("5) Crear asiento contable de nomina en Odoo", expanded=False):
 st.divider()
 
 with st.expander("6) Solicitudes de firma movil", expanded=False):
-    base_url_default = load_sign_base_url_from_env_file() or ""
-    sign_base_url = st.text_input("URL base del portal de firma", value=base_url_default)
+    sign_base_url_env = normalize_base_url(load_sign_base_url_from_env_file())
+    st.text_input(
+        "URL publica detectada (SIGN_BASE_URL)",
+        value=sign_base_url_env,
+        disabled=True,
+        help="Se usa directamente para construir enlaces de firma. Configurar en .env.local",
+    )
     token_ttl_hours = st.number_input("Caducidad del enlace (horas)", min_value=1, max_value=24 * 30, value=24 * 10)
     wa_template = st.text_area(
         "Plantilla WhatsApp",
@@ -848,9 +858,11 @@ with st.expander("6) Solicitudes de firma movil", expanded=False):
     )
 
     can_create_requests = bool(st.session_state.get("odoo_matches") and st.session_state.get("split_pdfs"))
-    if not sign_base_url.strip():
+    if not sign_base_url_env.strip():
         st.error("Falta SIGN_BASE_URL. Define una URL publica completa en .env.local (ej: https://rrhh.tudominio.com).")
         can_create_requests = False
+    elif "localhost" in sign_base_url_env or "127.0.0.1" in sign_base_url_env:
+        st.warning("SIGN_BASE_URL apunta a localhost. Para enlaces WhatsApp debe ser una URL publica real.")
     if not can_create_requests:
         st.info("Primero procesa archivos y realiza emparejamiento con Odoo.")
     else:
@@ -914,7 +926,7 @@ with st.expander("6) Solicitudes de firma movil", expanded=False):
                     }
                 )
                 add_event(req_id, "created", {"filename": match.filename})
-                sign_link = build_sign_link(sign_base_url, token_value)
+                sign_link = build_sign_link(sign_base_url_env, token_value)
                 period_label = f"{int(month):02d}/{int(year)}"
                 employee_name = str(match.employee_name_odoo or match.employee_name_excel or "")
                 wa_message = render_message(wa_template, employee_name, period_label, sign_link)
