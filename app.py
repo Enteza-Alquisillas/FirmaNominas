@@ -100,7 +100,7 @@ def load_odoo_config_from_env_file() -> dict[str, str]:
 
 
 def load_sign_base_url_from_env_file() -> str:
-    env_path = Path(".env.local")
+    env_path = Path(__file__).parent / ".env.local"
     value = ""
     if env_path.exists():
         for raw_line in env_path.read_text(encoding="utf-8").splitlines():
@@ -877,7 +877,7 @@ with st.expander("6) Solicitudes de firma movil", expanded=False):
         "Plantilla WhatsApp",
         value=(
             "Hola {nombre}, ya puedes firmar tu nomina del periodo {periodo}.\n\n"
-            "Enlace de firma:\n{link}"
+            "Enlace de firma:\n\n{link}"
         ),
         help="Variables disponibles: {nombre}, {periodo}, {link}",
     )
