@@ -94,6 +94,25 @@ def load_odoo_config_from_env_file() -> dict[str, str]:
     return config
 
 
+def load_sign_base_url_from_env_file() -> str:
+    env_path = Path(".env.local")
+    value = ""
+    if env_path.exists():
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, raw_value = line.split("=", 1)
+            if key.strip() == "SIGN_BASE_URL":
+                value = raw_value.strip().strip('"').strip("'")
+                break
+
+    if os.getenv("SIGN_BASE_URL"):
+        value = os.getenv("SIGN_BASE_URL", "")
+
+    return value.strip()
+
+
 def _save_signature_image(signature_image_data, out_path: Path) -> bytes:
     image = Image.fromarray(signature_image_data.astype("uint8"), mode="RGBA")
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -231,7 +250,7 @@ def _render_public_sign_page(token_value: str) -> None:
             mark_uploaded(request["id"], int(upload_result.get("attachment_id") or 0))
             save_artifact(request["id"], str(signature_path), str(signed_pdf_path))
             add_event(request["id"], "signed_and_uploaded", {"filename": signed_pdf_path.name})
-            st.success("Nomina firmada y enviada a Odoo correctamente.")
+            st.rerun()
         except Exception as exc:
             mark_error(request["id"])
             add_event(request["id"], "error", {"message": str(exc)})
@@ -816,7 +835,7 @@ with st.expander("5) Crear asiento contable de nomina en Odoo", expanded=False):
 st.divider()
 
 with st.expander("6) Solicitudes de firma movil", expanded=False):
-    base_url_default = os.getenv("SIGN_BASE_URL", "http://localhost:8501")
+    base_url_default = load_sign_base_url_from_env_file() or ""
     sign_base_url = st.text_input("URL base del portal de firma", value=base_url_default)
     token_ttl_hours = st.number_input("Caducidad del enlace (horas)", min_value=1, max_value=24 * 30, value=24 * 10)
     wa_template = st.text_area(
@@ -829,6 +848,9 @@ with st.expander("6) Solicitudes de firma movil", expanded=False):
     )
 
     can_create_requests = bool(st.session_state.get("odoo_matches") and st.session_state.get("split_pdfs"))
+    if not sign_base_url.strip():
+        st.error("Falta SIGN_BASE_URL. Define una URL publica completa en .env.local (ej: https://rrhh.tudominio.com).")
+        can_create_requests = False
     if not can_create_requests:
         st.info("Primero procesa archivos y realiza emparejamiento con Odoo.")
     else:
