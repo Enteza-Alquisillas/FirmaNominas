@@ -9,8 +9,6 @@ services:
     restart: unless-stopped
     env_file:
       - .env.local
-    environment:
-      - SIGN_BASE_URL=${SIGN_BASE_URL:-http://localhost}
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
