@@ -30,7 +30,7 @@ from core.odoo_export import (
 )
 from core.payroll_excel import parse_payroll_excel
 from core.payroll_pdf import extract_pdf_pages, split_pdf_to_zip
-from core.signature_delivery import build_whatsapp_url, render_message
+from core.signature_delivery import build_sign_link, build_whatsapp_url, render_message
 from core.signature_pdf import insert_signature_into_pdf
 from core.signature_repository import (
     add_event,
@@ -822,8 +822,8 @@ with st.expander("6) Solicitudes de firma movil", expanded=False):
     wa_template = st.text_area(
         "Plantilla WhatsApp",
         value=(
-            "Hola {nombre}, ya puedes firmar tu nomina del periodo {periodo}. "
-            "Accede aqui: {link}"
+            "Hola {nombre}, ya puedes firmar tu nomina del periodo {periodo}.\n\n"
+            "Enlace de firma:\n{link}"
         ),
         help="Variables disponibles: {nombre}, {periodo}, {link}",
     )
@@ -839,6 +839,30 @@ with st.expander("6) Solicitudes de firma movil", expanded=False):
             mapping_by_worker = {
                 str(row.get("n_trabajador", "")): row for row in (st.session_state.employee_rows or [])
             }
+            odoo_phone_by_employee_id: dict[int, str] = {}
+            if st.session_state.get("_odoo_connected"):
+                try:
+                    odoo: OdooClient = st.session_state._odoo_client
+                    employee_ids = [
+                        int(m.employee_id_odoo)
+                        for m in st.session_state.odoo_matches
+                        if m.match_status == "MATCH_OK" and m.employee_id_odoo
+                    ]
+                    if employee_ids:
+                        phone_fields = ["mobile_phone", "mobile", "work_phone", "phone"]
+                        employees_phone_data = odoo.read("hr.employee", employee_ids, phone_fields)
+                        for emp in employees_phone_data:
+                            emp_id = int(emp.get("id"))
+                            phone_val = ""
+                            for field_name in phone_fields:
+                                value = emp.get(field_name)
+                                if value:
+                                    phone_val = str(value).strip()
+                                    break
+                            odoo_phone_by_employee_id[emp_id] = phone_val
+                except Exception:
+                    odoo_phone_by_employee_id = {}
+
             for match in st.session_state.odoo_matches:
                 if match.match_status != "MATCH_OK" or not match.employee_id_odoo:
                     continue
@@ -847,6 +871,10 @@ with st.expander("6) Solicitudes de firma movil", expanded=False):
                     continue
                 row_map = mapping_by_worker.get(str(match.worker_number), {})
                 telefono = str(row_map.get("telefono") or row_map.get("movil") or "").strip()
+                if not telefono:
+                    telefono = str(
+                        odoo_phone_by_employee_id.get(int(match.employee_id_odoo), "")
+                    ).strip()
                 original_path = originals_dir / match.filename
                 original_path.write_bytes(pdf_bytes)
                 token_value = create_token()
@@ -864,7 +892,7 @@ with st.expander("6) Solicitudes de firma movil", expanded=False):
                     }
                 )
                 add_event(req_id, "created", {"filename": match.filename})
-                sign_link = f"{sign_base_url}?token={token_value}"
+                sign_link = build_sign_link(sign_base_url, token_value)
                 period_label = f"{int(month):02d}/{int(year)}"
                 employee_name = str(match.employee_name_odoo or match.employee_name_excel or "")
                 wa_message = render_message(wa_template, employee_name, period_label, sign_link)

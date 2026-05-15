@@ -21,9 +21,25 @@ def build_whatsapp_url(phone: str, message: str) -> str:
     return f"https://wa.me/{phone_norm}?text={quote(message)}"
 
 
+def normalize_base_url(value: str) -> str:
+    base = str(value or "").strip()
+    if not base:
+        return ""
+    if not (base.startswith("http://") or base.startswith("https://")):
+        base = "https://" + base
+    return base.rstrip("/")
+
+
+def build_sign_link(base_url: str, token_value: str) -> str:
+    base = normalize_base_url(base_url)
+    return f"{base}/?token={token_value}"
+
+
 def render_message(template: str, employee_name: str, period_label: str, sign_link: str) -> str:
     msg = template
     msg = msg.replace("{nombre}", employee_name)
     msg = msg.replace("{periodo}", period_label)
     msg = msg.replace("{link}", sign_link)
+    if sign_link and sign_link not in msg:
+        msg = msg.rstrip() + "\n\n" + sign_link
     return msg
