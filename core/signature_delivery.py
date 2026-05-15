@@ -18,7 +18,7 @@ def build_whatsapp_url(phone: str, message: str) -> str:
     phone_norm = normalize_phone_for_whatsapp(phone)
     if phone_norm.startswith("+"):
         phone_norm = phone_norm[1:]
-    return f"https://wa.me/{phone_norm}?text={quote(message)}"
+    return f"https://wa.me/{phone_norm}?text={quote(message, safe='')}"
 
 
 def normalize_base_url(value: str) -> str:
