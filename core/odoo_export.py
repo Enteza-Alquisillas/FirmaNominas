@@ -50,6 +50,7 @@ def build_employee_rows(employees: list[PayrollEmployee], pdf_pages: list[Paysli
                 "cuenta_especie_autonomo": DEFAULTS["account_especie_autonomo"],
                 "cuenta_indemniz_inss": DEFAULTS["account_indemniz_inss"],
                 "partner_odoo": emp.name,
+                "telefono": "",
                 "tax_grid_sueldo": DEFAULTS["tax_grid_salary"],
                 "tax_grid_irpf": DEFAULTS["tax_grid_irpf"],
                 "total_bruto": decimal_to_float(emp.concepts.get("total_bruto", Decimal("0"))),
@@ -86,6 +87,7 @@ def mapping_template_xlsx(employee_rows: list[dict[str, Any]]) -> bytes:
         "cuenta_especie_autonomo",
         "cuenta_indemniz_inss",
         "partner_odoo",
+        "telefono",
         "tax_grid_sueldo",
         "tax_grid_irpf",
         "total_bruto",
@@ -110,6 +112,7 @@ def mapping_template_xlsx(employee_rows: list[dict[str, Any]]) -> bytes:
     info.append(["cuenta_ss_acreedora", "Cuenta 476 para el crédito agregado del TC1."])
     info.append(["cuenta_especie_autonomo", "Cuenta para compensar valores en especie/autónomo que figuran como deducción."])
     info.append(["cuenta_indemniz_inss", "Cuenta para prestaciones/indemnizaciones INSS incluidas en devengos, si procede."])
+    info.append(["telefono", "Telefono movil para envio de enlace de firma por WhatsApp (formato internacional recomendado)."])
     info.append(["tax_grid_sueldo", "Etiqueta/cuadrícula fiscal para bases sujetas a retención si se usa modelo 111 en Odoo."])
     info.append(["tax_grid_irpf", "Etiqueta/cuadrícula fiscal para la línea acreedora de retenciones."])
     _format_sheet(info)
