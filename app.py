@@ -48,9 +48,9 @@ from core.signature_tokens import create_token, expires_at, is_expired, token_ha
 from core.state import clear_processing_state, init_state
 from core.utils import mask_dni
 
-st.set_page_config(page_title="Divisor de nominas + asiento Odoo", layout="wide")
+st.set_page_config(page_title="Enteza - RRHH", layout="wide")
 
-st.title("Divisor de nominas PDF y generador de asiento para Odoo 15")
+st.title("Enteza - RRHH")
 st.caption("Aplicacion local: los PDF y Excel se procesan en el servidor donde ejecutes Streamlit.")
 
 init_state()
