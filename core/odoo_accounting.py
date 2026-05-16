@@ -15,22 +15,36 @@ def _to_decimal(value: Any) -> Decimal:
     return money(Decimal(str(value)))
 
 
+def _is_total_center(center: str | None) -> bool:
+    return center is not None and "TOTAL" in center.upper()
+
+
 def build_payroll_move_lines(
     employees: list[Any],
     employee_rows: list[dict[str, Any]],
     month: int,
     year: int,
     aggregate_ss: bool = True,
+    center_filter: str | None = None,
 ) -> list[dict[str, Any]]:
     mapping = {str(row.get("n_trabajador")): row for row in employee_rows}
     lines: list[dict[str, Any]] = []
     total_tc1 = Decimal("0.00")
+    first_included_map: dict[str, Any] = {}
 
     for emp in employees:
+        if _is_total_center(emp.center):
+            continue
+        if center_filter is not None and (emp.center or "") != center_filter:
+            continue
+
         map_row = mapping.get(str(emp.worker_number), {})
         include = str(map_row.get("incluir", "SI")).upper()
         if include not in ("SI", "S", "YES", "TRUE", "1"):
             continue
+
+        if not first_included_map:
+            first_included_map = map_row
 
         gross = _to_decimal(emp.concepts.get("total_bruto", 0))
         net = _to_decimal(emp.concepts.get("total_neto", 0))
@@ -43,8 +57,8 @@ def build_payroll_move_lines(
 
         total_tc1 += tc1
 
-        def append_line(account_key: str, label: str, debit: Decimal, credit: Decimal):
-            account_code = str(map_row.get(account_key) or "").strip()
+        def append_line(account_key: str, label: str, debit: Decimal, credit: Decimal, _map_row=map_row):
+            account_code = str(_map_row.get(account_key) or "").strip()
             if not account_code:
                 return
             lines.append(
@@ -52,7 +66,7 @@ def build_payroll_move_lines(
                     "worker_number": str(emp.worker_number),
                     "employee_name": emp.name,
                     "account_code": account_code,
-                    "partner_name": str(map_row.get("partner_odoo") or "").strip(),
+                    "partner_name": str(_map_row.get("partner_odoo") or "").strip(),
                     "name": label,
                     "debit": float(money(debit)),
                     "credit": float(money(credit)),
@@ -114,8 +128,8 @@ def build_payroll_move_lines(
             )
 
     if aggregate_ss and not is_zero(total_tc1):
-        first_map = next(iter(mapping.values()), {}) if mapping else {}
-        account_code = str(first_map.get("cuenta_ss_acreedora") or "").strip()
+        map_for_ss = first_included_map or (next(iter(mapping.values()), {}) if mapping else {})
+        account_code = str(map_for_ss.get("cuenta_ss_acreedora") or "").strip()
         if account_code:
             lines.insert(
                 0,
@@ -131,6 +145,29 @@ def build_payroll_move_lines(
             )
 
     return lines
+
+
+def build_payroll_moves_by_center(
+    employees: list[Any],
+    employee_rows: list[dict[str, Any]],
+    month: int,
+    year: int,
+    aggregate_ss: bool = True,
+) -> dict[str, list[dict[str, Any]]]:
+    centers: list[str] = []
+    for emp in employees:
+        c = emp.center or ""
+        if not _is_total_center(c) and c not in centers:
+            centers.append(c)
+
+    result: dict[str, list[dict[str, Any]]] = {}
+    for center in centers:
+        lines = build_payroll_move_lines(
+            employees, employee_rows, month, year, aggregate_ss, center_filter=center
+        )
+        if lines:
+            result[center] = lines
+    return result
 
 
 def summarize_move_lines(lines: list[dict[str, Any]]) -> dict[str, Any]:
@@ -174,6 +211,13 @@ def _resolve_account_ids(odoo: OdooClient, codes: list[str]) -> dict[str, int]:
         rows = odoo.search_read("account.account", [("code", "=", code)], ["id", "code"], limit=1)
         if rows:
             result[code] = int(rows[0]["id"])
+            continue
+        # Fallback: si el código empieza por 4651, probar con 4650 (mismo sufijo)
+        if code.startswith("4651"):
+            fallback_code = "4650" + code[4:]
+            rows = odoo.search_read("account.account", [("code", "=", fallback_code)], ["id", "code"], limit=1)
+            if rows:
+                result[code] = int(rows[0]["id"])
     return result
 
 

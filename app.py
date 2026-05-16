@@ -15,7 +15,7 @@ from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
 from core.odoo_attachments import upload_all_payslips
-from core.odoo_accounting import build_payroll_move_lines, create_payroll_move_in_odoo
+from core.odoo_accounting import build_payroll_move_lines, build_payroll_moves_by_center, create_payroll_move_in_odoo
 from core.odoo_client import OdooClient
 from core.odoo_employee_matcher import (
     apply_manual_mapping,
@@ -816,51 +816,68 @@ with st.expander("5) Crear asiento contable de nomina en Odoo", expanded=False):
             value=True,
             key="dry_run_payroll_move",
         )
-        create_move = st.button("Crear asiento contable en Odoo", type="primary")
+        create_move = st.button("Crear asientos contables en Odoo (uno por centro)", type="primary")
 
         if create_move:
             odoo: OdooClient = st.session_state._odoo_client
-            with st.spinner("Preparando asiento contable..." if dry_run_move else "Creando asiento en Odoo..."):
-                move_lines = build_payroll_move_lines(
+            with st.spinner("Preparando asientos contables..." if dry_run_move else "Creando asientos en Odoo..."):
+                moves_by_center = build_payroll_moves_by_center(
                     employees=st.session_state.excel_employees,
                     employee_rows=st.session_state.employee_rows,
                     month=month,
                     year=year,
                     aggregate_ss=aggregate_ss,
                 )
-                result = create_payroll_move_in_odoo(
-                    odoo=odoo,
-                    lines=move_lines,
-                    move_date=accounting_date.isoformat(),
-                    journal=journal,
-                    reference=reference,
-                    dry_run=dry_run_move,
-                )
-                st.session_state.odoo_move_result = result
-                st.session_state.odoo_move_preview = move_lines
+
+                if not moves_by_center:
+                    st.warning("No se encontraron centros de trabajo con empleados para generar asientos.")
+                else:
+                    results_by_center: dict[str, dict] = {}
+                    for center_name, center_lines in moves_by_center.items():
+                        center_label = center_name if center_name else "Sin centro"
+                        center_reference = f"{reference} - {center_label}" if center_label != "Sin centro" else reference
+                        res = create_payroll_move_in_odoo(
+                            odoo=odoo,
+                            lines=center_lines,
+                            move_date=accounting_date.isoformat(),
+                            journal=journal,
+                            reference=center_reference,
+                            dry_run=dry_run_move,
+                        )
+                        results_by_center[center_label] = {
+                            "result": res,
+                            "lines": center_lines,
+                        }
+
+                    st.session_state.odoo_move_results = results_by_center
 
             st.rerun()
 
-        if st.session_state.get("odoo_move_result"):
-            move_result = st.session_state.odoo_move_result
-            status = move_result.get("status", "")
-            if status == "OK_SIMULADO":
-                st.success(move_result.get("message", "Simulacion completada."))
-            elif status == "CREADO":
-                st.success(move_result.get("message", "Asiento creado correctamente."))
-            else:
-                st.error(move_result.get("message", "No se pudo crear el asiento."))
+        if st.session_state.get("odoo_move_results"):
+            for center_label, data in st.session_state.odoo_move_results.items():
+                move_result = data["result"]
+                preview_lines = data["lines"]
+                status = move_result.get("status", "")
 
-            summary_move = move_result.get("summary", {})
-            col_mv1, col_mv2, col_mv3, col_mv4 = st.columns(4)
-            col_mv1.metric("Lineas", int(summary_move.get("line_count", 0)))
-            col_mv2.metric("Debe", f"{float(summary_move.get('total_debit', 0)):.2f}")
-            col_mv3.metric("Haber", f"{float(summary_move.get('total_credit', 0)):.2f}")
-            col_mv4.metric("Diferencia", f"{float(summary_move.get('balance', 0)):.2f}")
+                st.markdown(f"### Centro: {center_label}")
+                if status == "OK_SIMULADO":
+                    st.success(move_result.get("message", "Simulacion completada."))
+                elif status == "CREADO":
+                    st.success(move_result.get("message", "Asiento creado correctamente."))
+                else:
+                    st.error(move_result.get("message", "No se pudo crear el asiento."))
 
-            preview_lines = st.session_state.get("odoo_move_preview") or []
-            if preview_lines:
-                st.dataframe(pd.DataFrame(preview_lines), use_container_width=True, height=300)
+                summary_move = move_result.get("summary", {})
+                col_mv1, col_mv2, col_mv3, col_mv4 = st.columns(4)
+                col_mv1.metric("Lineas", int(summary_move.get("line_count", 0)))
+                col_mv2.metric("Debe", f"{float(summary_move.get('total_debit', 0)):.2f}")
+                col_mv3.metric("Haber", f"{float(summary_move.get('total_credit', 0)):.2f}")
+                col_mv4.metric("Diferencia", f"{float(summary_move.get('balance', 0)):.2f}")
+
+                if preview_lines:
+                    st.dataframe(pd.DataFrame(preview_lines), use_container_width=True, height=260)
+
+                st.divider()
 
 st.divider()
 
@@ -1023,8 +1040,6 @@ if st.button("Limpiar resultados / iniciar nuevo procesamiento"):
         del st.session_state["_odoo_connected"]
     if "_warnings" in st.session_state:
         del st.session_state["_warnings"]
-    if "odoo_move_result" in st.session_state:
-        del st.session_state["odoo_move_result"]
-    if "odoo_move_preview" in st.session_state:
-        del st.session_state["odoo_move_preview"]
+    if "odoo_move_results" in st.session_state:
+        del st.session_state["odoo_move_results"]
     st.rerun()

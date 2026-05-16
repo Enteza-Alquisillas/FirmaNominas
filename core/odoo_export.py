@@ -32,6 +32,8 @@ def build_employee_rows(employees: list[PayrollEmployee], pdf_pages: list[Paysli
     pdf_by_worker = {p.worker_number: p for p in pdf_pages if p.worker_number}
     rows: list[dict[str, Any]] = []
     for emp in employees:
+        if emp.center and "TOTAL" in emp.center.upper():
+            continue
         pdf = pdf_by_worker.get(emp.worker_number)
         rows.append(
             {
@@ -150,6 +152,8 @@ def generate_odoo_import_xlsx(
     total_tc1 = Decimal("0.00")
 
     for emp in employees:
+        if emp.center and "TOTAL" in emp.center.upper():
+            continue
         map_row = mapping.get(emp.worker_number, {})
         if str(map_row.get("incluir", "SI")).upper() not in ("SI", "S", "YES", "TRUE", "1"):
             continue
