@@ -22,6 +22,9 @@ def find_anchor_below_recibi(
     return None
 
 
+_CM = 28.35  # puntos por centímetro en PDF
+
+
 def insert_signature_into_pdf(
     pdf_input_path: str | Path,
     signature_png_bytes: bytes,
@@ -37,6 +40,10 @@ def insert_signature_into_pdf(
         anchor = find_anchor_below_recibi(doc, page_index=page_index)
         if anchor is not None:
             page_index, x, y = anchor
+
+        # Ajuste de posición: 2 cm a la izquierda, 1 cm hacia arriba
+        x -= 2 * _CM
+        y -= 1 * _CM
 
         if page_index < 0 or page_index >= len(doc):
             page_index = 0
