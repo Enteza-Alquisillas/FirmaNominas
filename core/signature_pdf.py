@@ -41,9 +41,9 @@ def insert_signature_into_pdf(
         if anchor is not None:
             page_index, x, y = anchor
 
-        # Ajuste de posición: 2 cm a la izquierda, 1 cm hacia arriba
+        # Ajuste de posición: 2 cm a la izquierda, 0.5 cm hacia arriba
         x -= 2 * _CM
-        y -= 1 * _CM
+        y -= 0.5 * _CM
 
         if page_index < 0 or page_index >= len(doc):
             page_index = 0
