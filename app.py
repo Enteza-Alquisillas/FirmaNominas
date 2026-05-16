@@ -53,7 +53,17 @@ from core.signature_tokens import create_token, expires_at, is_expired, token_ha
 from core.state import clear_processing_state, init_state
 from core.utils import mask_dni
 
-st.set_page_config(page_title="Enteza - RRHH", layout="wide")
+_LOGO_PATH = Path(__file__).parent / "logo-enteza.png"
+_logo_img = Image.open(_LOGO_PATH) if _LOGO_PATH.exists() else None
+
+st.set_page_config(
+    page_title="Enteza - RRHH",
+    page_icon=_logo_img,
+    layout="wide",
+)
+
+if _logo_img:
+    st.logo(str(_LOGO_PATH), size="large")
 
 st.title("Enteza - RRHH")
 st.caption("Aplicacion local: los PDF y Excel se procesan en el servidor donde ejecutes Streamlit.")
