@@ -80,6 +80,32 @@ def upload_employee_payslip_attachment(
     }
 
 
+def delete_unsigned_attachment(odoo: OdooClient, employee_id: int, signed_filename: str) -> bool:
+    """Elimina el adjunto sin firmar tras subir el firmado.
+
+    Deriva el nombre original quitando el sufijo '-firmada' del stem del archivo firmado.
+    Devuelve True si se eliminó, False si no existía o hubo error.
+    """
+    stem = signed_filename
+    if stem.lower().endswith(".pdf"):
+        stem = stem[:-4]
+    # Quitar sufijo -firmada (o _firmada por si acaso)
+    for suffix in ("-firmada", "_firmada"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    unsigned_filename = stem + ".pdf"
+
+    existing = find_existing_attachment(odoo, employee_id, unsigned_filename)
+    if not existing:
+        return False
+    try:
+        odoo.execute_kw("ir.attachment", "unlink", [[existing["id"]]])
+        return True
+    except Exception:
+        return False
+
+
 def upload_all_payslips(
     odoo: OdooClient,
     matches: list[Any],

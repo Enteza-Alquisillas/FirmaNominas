@@ -14,7 +14,7 @@ import streamlit.components.v1 as components
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
-from core.odoo_attachments import upload_all_payslips
+from core.odoo_attachments import delete_unsigned_attachment, upload_all_payslips
 from core.odoo_accounting import build_payroll_move_lines, build_payroll_moves_by_center, create_payroll_move_in_odoo
 from core.odoo_client import OdooClient
 from core.odoo_employee_matcher import (
@@ -279,7 +279,17 @@ def _render_public_sign_page(token_value: str) -> None:
             mark_signed(request["id"])
             mark_uploaded(request["id"], int(upload_result.get("attachment_id") or 0))
             save_artifact(request["id"], str(signature_path), str(signed_pdf_path))
-            add_event(request["id"], "signed_and_uploaded", {"filename": signed_pdf_path.name})
+
+            deleted = delete_unsigned_attachment(
+                odoo=client,
+                employee_id=int(request["employee_id_odoo"]),
+                signed_filename=signed_pdf_path.name,
+            )
+            add_event(
+                request["id"],
+                "signed_and_uploaded",
+                {"filename": signed_pdf_path.name, "unsigned_deleted": deleted},
+            )
             st.rerun()
         except Exception as exc:
             mark_error(request["id"])
