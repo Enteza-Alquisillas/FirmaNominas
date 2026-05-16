@@ -161,6 +161,8 @@ def _save_signature_image(signature_image_data, out_path: Path) -> bytes:
 
 
 def _render_public_sign_page(token_value: str) -> None:
+    if _logo_img:
+        st.image(_logo_img, width=160)
     st.title("Firma de nomina")
     st.caption("Firma manuscrita desde movil")
 
