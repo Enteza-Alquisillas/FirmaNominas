@@ -204,20 +204,49 @@ def _resolve_journal_id(odoo: OdooClient, journal: str) -> int:
     raise ValueError(f"No se encontro diario en Odoo para '{journal}'.")
 
 
+def _prefix_search(odoo: OdooClient, prefix: str, cache: dict[str, int | None]) -> int | None:
+    if prefix in cache:
+        return cache[prefix]
+    rows = odoo.search_read(
+        "account.account",
+        [("code", "like", prefix + "%")],
+        ["id", "code"],
+        limit=1,
+    )
+    found = int(rows[0]["id"]) if rows else None
+    cache[prefix] = found
+    return found
+
+
 def _resolve_account_ids(odoo: OdooClient, codes: list[str]) -> dict[str, int]:
     uniq_codes = sorted({str(code).strip() for code in codes if str(code).strip()})
     result: dict[str, int] = {}
+    prefix_cache: dict[str, int | None] = {}
+
     for code in uniq_codes:
+        # 1. Búsqueda exacta
         rows = odoo.search_read("account.account", [("code", "=", code)], ["id", "code"], limit=1)
         if rows:
             result[code] = int(rows[0]["id"])
             continue
-        # Fallback: si el código empieza por 4651, probar con 4650 (mismo sufijo)
+
+        # 2. Para cuentas 4651XXXX: buscar por prefijo 4650 (cuenta genérica de remuneraciones)
         if code.startswith("4651"):
-            fallback_code = "4650" + code[4:]
-            rows = odoo.search_read("account.account", [("code", "=", fallback_code)], ["id", "code"], limit=1)
-            if rows:
-                result[code] = int(rows[0]["id"])
+            found = _prefix_search(odoo, "4650", prefix_cache)
+            if found:
+                result[code] = found
+                continue
+
+        # 3. Búsqueda por prefijo progresivo (quitar dígito a dígito desde la derecha)
+        for trim in range(1, len(code)):
+            prefix = code[:-trim]
+            if len(prefix) < 3:
+                break
+            found = _prefix_search(odoo, prefix, prefix_cache)
+            if found:
+                result[code] = found
+                break
+
     return result
 
 
