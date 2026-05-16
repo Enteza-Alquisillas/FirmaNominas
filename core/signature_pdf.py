@@ -43,7 +43,7 @@ def insert_signature_into_pdf(
 
         # Ajuste de posición: 2 cm a la izquierda, 0.5 cm hacia arriba
         x -= 2 * _CM
-        y -= 0.8 * _CM
+        y -= 0.2 * _CM
 
         if page_index < 0 or page_index >= len(doc):
             page_index = 0
