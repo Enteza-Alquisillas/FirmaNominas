@@ -57,7 +57,14 @@ def build_payroll_move_lines(
 
         total_tc1 += tc1
 
-        def append_line(account_key: str, label: str, debit: Decimal, credit: Decimal, _map_row=map_row):
+        def append_line(
+            account_key: str,
+            label: str,
+            debit: Decimal,
+            credit: Decimal,
+            role: str,
+            _map_row: dict = map_row,
+        ) -> None:
             account_code = str(_map_row.get(account_key) or "").strip()
             if not account_code:
                 return
@@ -70,18 +77,20 @@ def build_payroll_move_lines(
                     "name": label,
                     "debit": float(money(debit)),
                     "credit": float(money(credit)),
+                    "line_role": role,
                 }
             )
 
         label_base = f"NOMINA {month:02d}/{year} {emp.worker_number} {emp.name}"
         if not is_zero(gross):
-            append_line("cuenta_sueldos", label_base, gross, Decimal("0.00"))
+            append_line("cuenta_sueldos", label_base, gross, Decimal("0.00"), "salary")
         if not is_zero(ss_company):
             append_line(
                 "cuenta_ss_empresa",
                 f"SEGURIDAD SOCIAL EMPRESA {emp.worker_number} {emp.name}",
                 ss_company,
                 Decimal("0.00"),
+                "ss_company",
             )
         if not is_zero(net):
             append_line(
@@ -89,6 +98,7 @@ def build_payroll_move_lines(
                 f"LIQUIDO NOMINA {emp.worker_number} {emp.name}",
                 Decimal("0.00"),
                 net,
+                "remuneration",
             )
         if not is_zero(irpf):
             append_line(
@@ -96,6 +106,7 @@ def build_payroll_move_lines(
                 f"IRPF NOMINA {emp.worker_number} {emp.name}",
                 Decimal("0.00"),
                 irpf,
+                "irpf",
             )
         if not is_zero(embargo):
             append_line(
@@ -103,6 +114,7 @@ def build_payroll_move_lines(
                 f"EMBARGO JUZGADO {emp.worker_number} {emp.name}",
                 Decimal("0.00"),
                 embargo,
+                "embargo",
             )
         if not is_zero(especie):
             append_line(
@@ -110,6 +122,7 @@ def build_payroll_move_lines(
                 f"VALORES EN ESPECIE/AUTONOMO {emp.worker_number} {emp.name}",
                 Decimal("0.00"),
                 especie,
+                "especie",
             )
         if not is_zero(indemniz_inss):
             append_line(
@@ -117,6 +130,7 @@ def build_payroll_move_lines(
                 f"PRESTACIONES/INDEMNIZACIONES INSS {emp.worker_number} {emp.name}",
                 Decimal("0.00"),
                 indemniz_inss,
+                "indemniz_inss",
             )
 
         if not aggregate_ss and not is_zero(tc1):
@@ -125,6 +139,7 @@ def build_payroll_move_lines(
                 f"TC1 {emp.worker_number} {emp.name}",
                 Decimal("0.00"),
                 tc1,
+                "ss_creditor",
             )
 
     if aggregate_ss and not is_zero(total_tc1):
@@ -141,6 +156,7 @@ def build_payroll_move_lines(
                     "name": f"TC1 NOMINA {month:02d}/{year}",
                     "debit": 0.0,
                     "credit": float(money(total_tc1)),
+                    "line_role": "ss_creditor",
                 },
             )
 
@@ -260,6 +276,44 @@ def _resolve_partner_ids(odoo: OdooClient, names: list[str]) -> dict[str, int]:
     return result
 
 
+def _resolve_irpf_tax_and_tags(
+    odoo: OdooClient,
+) -> tuple[int | None, int | None, int | None]:
+    """Busca el impuesto IRPF retención y los tags mod111[02] / mod111[03].
+
+    Returns (tax_id, tag_mod111_02_id, tag_mod111_03_id). Cualquiera puede ser None
+    si no se encuentra en este Odoo.
+    """
+    tax_id: int | None = None
+    for domain in [
+        [("name", "ilike", "Retenciones IRPF"), ("type_tax_use", "=", "none")],
+        [("name", "ilike", "IRPF"), ("type_tax_use", "=", "none")],
+        [("name", "ilike", "Retenciones IRPF")],
+        [("name", "ilike", "IRPF")],
+    ]:
+        rows = odoo.search_read("account.tax", domain, ["id", "name"], limit=1)
+        if rows:
+            tax_id = int(rows[0]["id"])
+            break
+
+    tag_02: int | None = None
+    tag_03: int | None = None
+    for tag_name in ["mod111[02]", "mod111[03]"]:
+        rows = odoo.search_read(
+            "account.account.tag",
+            [("name", "=", tag_name)],
+            ["id", "name"],
+            limit=1,
+        )
+        if rows:
+            if tag_name == "mod111[02]":
+                tag_02 = int(rows[0]["id"])
+            else:
+                tag_03 = int(rows[0]["id"])
+
+    return tax_id, tag_02, tag_03
+
+
 def create_payroll_move_in_odoo(
     odoo: OdooClient,
     lines: list[dict[str, Any]],
@@ -277,9 +331,13 @@ def create_payroll_move_in_odoo(
     partner_ids = _resolve_partner_ids(odoo, [line.get("partner_name", "") for line in lines])
 
     missing_accounts = sorted(
-        {str(line.get("account_code", "")).strip() for line in lines if str(line.get("account_code", "")).strip() and str(line.get("account_code", "")).strip() not in account_ids}
+        {
+            str(line.get("account_code", "")).strip()
+            for line in lines
+            if str(line.get("account_code", "")).strip()
+            and str(line.get("account_code", "")).strip() not in account_ids
+        }
     )
-
     if missing_accounts:
         return {
             "status": "ERROR",
@@ -287,10 +345,14 @@ def create_payroll_move_in_odoo(
             "summary": summary,
         }
 
+    irpf_tax_id, tag_mod111_02, tag_mod111_03 = _resolve_irpf_tax_and_tags(odoo)
+
     move_lines: list[tuple[int, int, dict[str, Any]]] = []
     for line in lines:
         account_code = str(line.get("account_code", "")).strip()
         partner_name = str(line.get("partner_name", "")).strip()
+        role = str(line.get("line_role", ""))
+
         values: dict[str, Any] = {
             "name": str(line.get("name", "")).strip() or "Nomina",
             "account_id": account_ids[account_code],
@@ -299,6 +361,19 @@ def create_payroll_move_in_odoo(
         }
         if partner_name and partner_name in partner_ids:
             values["partner_id"] = partner_ids[partner_name]
+
+        # Etiquetas fiscales Modelo 111
+        if role == "salary":
+            # Base imponible de sueldos → cuadrícula mod111[02]
+            if tag_mod111_02:
+                values["tax_tag_ids"] = [(6, 0, [tag_mod111_02])]
+        elif role == "irpf":
+            # Línea acreedora de IRPF → es la línea de impuesto + cuadrícula mod111[03]
+            if irpf_tax_id:
+                values["tax_line_id"] = irpf_tax_id
+            if tag_mod111_03:
+                values["tax_tag_ids"] = [(6, 0, [tag_mod111_03])]
+
         move_lines.append((0, 0, values))
 
     payload = {
@@ -316,6 +391,9 @@ def create_payroll_move_in_odoo(
             "summary": summary,
             "journal_id": journal_id,
             "line_count": len(move_lines),
+            "irpf_tax_id": irpf_tax_id,
+            "tag_mod111_02": tag_mod111_02,
+            "tag_mod111_03": tag_mod111_03,
         }
 
     move_id = odoo.create("account.move", payload)

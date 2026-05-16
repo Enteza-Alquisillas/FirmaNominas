@@ -862,6 +862,19 @@ with st.expander("5) Crear asiento contable de nomina en Odoo", expanded=False):
                 st.markdown(f"### Centro: {center_label}")
                 if status == "OK_SIMULADO":
                     st.success(move_result.get("message", "Simulacion completada."))
+                    tax_ok = move_result.get("irpf_tax_id")
+                    t02_ok = move_result.get("tag_mod111_02")
+                    t03_ok = move_result.get("tag_mod111_03")
+                    if tax_ok and t02_ok and t03_ok:
+                        st.info(f"Impuesto IRPF encontrado (ID {tax_ok}). Tags mod111[02] (ID {t02_ok}) y mod111[03] (ID {t03_ok}) listos.")
+                    else:
+                        st.warning(
+                            "No se encontraron todos los elementos fiscales: "
+                            f"impuesto IRPF={'OK' if tax_ok else 'NO'}, "
+                            f"mod111[02]={'OK' if t02_ok else 'NO'}, "
+                            f"mod111[03]={'OK' if t03_ok else 'NO'}. "
+                            "Las lineas se crearán sin etiquetas fiscales para Modelo 111."
+                        )
                 elif status == "CREADO":
                     st.success(move_result.get("message", "Asiento creado correctamente."))
                 else:
