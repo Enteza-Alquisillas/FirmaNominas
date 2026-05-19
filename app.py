@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import calendar
 import hashlib
 import io
 import os
@@ -15,7 +16,14 @@ from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
 from core.odoo_attachments import delete_unsigned_attachment, upload_all_payslips
-from core.odoo_accounting import build_payroll_move_lines, build_payroll_moves_by_center, create_payroll_move_in_odoo
+from core.odoo_accounting import (
+    build_payroll_move_lines,
+    build_payroll_moves_by_center,
+    check_existing_465_accounts,
+    create_payroll_move_in_odoo,
+    fetch_partner_ids_by_worker,
+    summarize_move_lines,
+)
 from core.odoo_client import OdooClient
 from core.odoo_employee_matcher import (
     apply_manual_mapping,
@@ -24,9 +32,11 @@ from core.odoo_employee_matcher import (
 )
 from core.odoo_export import (
     build_employee_rows,
+    generate_move_draft_xlsx,
     generate_odoo_import_xlsx,
     mapping_template_xlsx,
     read_mapping_xlsx,
+    read_move_draft_xlsx,
 )
 from core.payroll_excel import parse_payroll_excel
 from core.payroll_pdf import extract_pdf_pages, split_pdf_to_zip
@@ -72,12 +82,26 @@ init_state()
 init_db()
 
 
+def _parse_kv_map(raw: str) -> dict[str, str]:
+    """Parse 'Key1:Val1,Key2:Val2' into a dict."""
+    result: dict[str, str] = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if ":" in part:
+            k, v = part.split(":", 1)
+            result[k.strip()] = v.strip()
+    return result
+
+
 def load_odoo_config_from_env_file() -> dict[str, str]:
-    config = {
+    config: dict[str, str] = {
         "url": "",
         "db": "",
         "username": "",
         "password": "",
+        "center_ccc_map": "",
+        "ss_account_map": "",
+        "dept_640_map": "",
     }
     env_path = Path(".env.local")
     if env_path.exists():
@@ -96,15 +120,24 @@ def load_odoo_config_from_env_file() -> dict[str, str]:
                 config["username"] = value
             elif key == "ODOO_PASSWORD":
                 config["password"] = value
+            elif key == "CENTER_CCC_MAP":
+                config["center_ccc_map"] = value
+            elif key == "SS_ACCOUNT_MAP":
+                config["ss_account_map"] = value
+            elif key == "DEPT_640_MAP":
+                config["dept_640_map"] = value
 
-    if os.getenv("ODOO_URL"):
-        config["url"] = os.getenv("ODOO_URL", "")
-    if os.getenv("ODOO_DB"):
-        config["db"] = os.getenv("ODOO_DB", "")
-    if os.getenv("ODOO_USER"):
-        config["username"] = os.getenv("ODOO_USER", "")
-    if os.getenv("ODOO_PASSWORD"):
-        config["password"] = os.getenv("ODOO_PASSWORD", "")
+    for env_key, cfg_key in [
+        ("ODOO_URL", "url"),
+        ("ODOO_DB", "db"),
+        ("ODOO_USER", "username"),
+        ("ODOO_PASSWORD", "password"),
+        ("CENTER_CCC_MAP", "center_ccc_map"),
+        ("SS_ACCOUNT_MAP", "ss_account_map"),
+        ("DEPT_640_MAP", "dept_640_map"),
+    ]:
+        if os.getenv(env_key):
+            config[cfg_key] = os.getenv(env_key, "")
 
     return config
 
@@ -312,16 +345,71 @@ if query_token:
     _render_public_sign_page(str(query_token))
     st.stop()
 
+_env_cfg = load_odoo_config_from_env_file()
+
 with st.sidebar:
     st.header("Parametros contables")
-    default_today = dt_date.today()
-    accounting_date = st.date_input("Fecha del asiento", value=default_today)
+
+    # A5 — Fecha: último día del mes nómina
+    _use_last_day = st.checkbox("Usar ultimo dia del mes nomina", value=True)
+    if _use_last_day:
+        _pm = st.session_state.get("period_month") or dt_date.today().month
+        _py = st.session_state.get("period_year") or dt_date.today().year
+        _last_day = calendar.monthrange(_py, _pm)[1]
+        accounting_date = st.date_input("Fecha del asiento", value=dt_date(_py, _pm, _last_day))
+    else:
+        accounting_date = st.date_input("Fecha del asiento", value=dt_date.today())
+
     journal = st.text_input("Diario Odoo", value="NOMINAS")
+    _ref_month = st.session_state.get("period_month") or dt_date.today().month
+    _ref_year = st.session_state.get("period_year") or dt_date.today().year
     reference = st.text_input(
         "Referencia del asiento",
-        value=f"NOMINA {default_today.month:02d}/{default_today.year}",
+        value=f"NOMINA {_ref_month:02d}/{_ref_year}",
     )
     aggregate_ss = st.checkbox("Agrupar credito del TC1 en una sola linea 476", value=True)
+
+    st.divider()
+
+    # B3 + A3 + A2 — Configuracion de cuentas por centro / departamento
+    with st.expander("Configuracion de cuentas"):
+        st.markdown("**Centro → CCC (ultimos 3 digitos)**")
+        st.caption("375 → cuenta 46500 · 213 → cuenta 46510")
+        _n_ccc = int(st.number_input("Num. centros CCC", 0, 8, 2, step=1, key="n_ccc"))
+        center_ccc_config: dict[str, str] = _parse_kv_map(_env_cfg.get("center_ccc_map", ""))
+        for _i in range(_n_ccc):
+            _cc1, _cc2 = st.columns(2)
+            with _cc1:
+                _cn = st.text_input(f"Centro {_i+1}", key=f"ccc_c_{_i}", placeholder="Almacen Sevilla")
+            with _cc2:
+                _cv = st.text_input(f"CCC", key=f"ccc_v_{_i}", placeholder="375 o 213")
+            if _cn.strip() and _cv.strip():
+                center_ccc_config[_cn.strip()] = _cv.strip()
+
+        st.markdown("**Cuenta SS empresa por centro**")
+        _n_ss = int(st.number_input("Num. centros SS", 0, 8, 2, step=1, key="n_ss"))
+        ss_accounts_by_center: dict[str, str] = _parse_kv_map(_env_cfg.get("ss_account_map", ""))
+        for _i in range(_n_ss):
+            _sc1, _sc2 = st.columns(2)
+            with _sc1:
+                _sn = st.text_input(f"Centro SS {_i+1}", key=f"ss_c_{_i}", placeholder="Almacen Sevilla")
+            with _sc2:
+                _sv = st.text_input(f"Cuenta 642", key=f"ss_v_{_i}", placeholder="64200100")
+            if _sn.strip() and _sv.strip():
+                ss_accounts_by_center[_sn.strip()] = _sv.strip()
+
+        st.markdown("**Cuenta 640 por departamento**")
+        _n_dept = int(st.number_input("Num. departamentos", 0, 8, 2, step=1, key="n_dept"))
+        salary_account_by_dept: dict[str, str] = _parse_kv_map(_env_cfg.get("dept_640_map", ""))
+        for _i in range(_n_dept):
+            _dc1, _dc2 = st.columns(2)
+            with _dc1:
+                _dn = st.text_input(f"Departamento {_i+1}", key=f"dept_c_{_i}", placeholder="Almacen")
+            with _dc2:
+                _dv = st.text_input(f"Cuenta 640", key=f"dept_v_{_i}", placeholder="64000000")
+            if _dn.strip() and _dv.strip():
+                salary_account_by_dept[_dn.strip()] = _dv.strip()
+
     st.divider()
     st.markdown(
         "**Flujo recomendado**\n\n"
@@ -357,7 +445,11 @@ def build_split_pdfs_dict(
         base = page_info.dni or f"trabajador_{page_info.worker_number or page_info.page_index + 1:>03}"
         from core.utils import slugify_filename
 
-        filename = f"{slugify_filename(base)}-{month:02d}-{year:04d}.pdf"
+        nombre_slug = slugify_filename(page_info.employee_name or "")
+        if nombre_slug and nombre_slug != "sin_nombre":
+            filename = f"{slugify_filename(base)}-{nombre_slug}-{month:02d}-{year:04d}.pdf"
+        else:
+            filename = f"{slugify_filename(base)}-{month:02d}-{year:04d}.pdf"
         if filename in used_names:
             stem = filename[:-4]
             counter = 2
@@ -405,7 +497,13 @@ with st.expander("1) Cargar archivos de entrada", expanded=not st.session_state.
                 (p.year for p in pdf_pages if p.year), accounting_date.year
             )
 
-            employee_rows = build_employee_rows(employees, pdf_pages)
+            employee_rows = build_employee_rows(
+                employees,
+                pdf_pages,
+                center_ccc_config=center_ccc_config,
+                ss_accounts_by_center=ss_accounts_by_center,
+                salary_account_by_dept=salary_account_by_dept,
+            )
             if mapping_path:
                 custom_mapping = read_mapping_xlsx(mapping_path)
                 for row in employee_rows:
@@ -491,8 +589,8 @@ with col1:
         pd.DataFrame(
             [
                 {
-                    "pagina": p.page_index + 1,
                     "n_trabajador": p.worker_number,
+                    "pagina": p.page_index + 1,
                     "dni": p.dni,
                     "nombre": p.employee_name,
                     "mes": p.month,
@@ -560,8 +658,6 @@ with col_c:
 
 st.divider()
 
-odoo_env = load_odoo_config_from_env_file()
-
 with st.expander("2) Conexion con Odoo 15 Community", expanded=False):
     st.markdown(
         "Introduce las credenciales de Odoo o configurales en `.streamlit/secrets.toml`."
@@ -570,21 +666,21 @@ with st.expander("2) Conexion con Odoo 15 Community", expanded=False):
     with col_odoo1:
         odoo_url = st.text_input(
             "URL de Odoo",
-            value=odoo_env.get("url", ""),
+            value=_env_cfg.get("url", ""),
             placeholder="https://odoo.midominio.com",
         )
         odoo_db = st.text_input(
             "Base de datos",
-            value=odoo_env.get("db", ""),
+            value=_env_cfg.get("db", ""),
         )
     with col_odoo2:
         odoo_user = st.text_input(
             "Usuario",
-            value=odoo_env.get("username", ""),
+            value=_env_cfg.get("username", ""),
         )
         odoo_pass = st.text_input(
             "Contrasena / API key",
-            value=odoo_env.get("password", ""),
+            value=_env_cfg.get("password", ""),
             type="password",
         )
 
@@ -622,7 +718,10 @@ with st.expander("3) Emparejar empleados con Odoo", expanded=False):
         except Exception as exc:
             st.error(f"No se pudieron leer los campos de hr.employee: {exc}")
             st.stop()
+        # B4: identification_id is the confirmed DNI field; it is always first
         dni_candidates = [f for f in ["identification_id", "vat", "x_dni", "x_studio_dni"] if f in employee_fields_info]
+        if not dni_candidates:
+            dni_candidates = ["identification_id"]
         name_candidates = [f for f in ["name"] if f in employee_fields_info]
 
         col_f1, col_f2, col_f3 = st.columns(3)
@@ -682,6 +781,44 @@ with st.expander("3) Emparejar empleados con Odoo", expanded=False):
                     st.session_state._odoo_dni_field = dni_field
                     st.session_state._odoo_worker_field = worker_field
                     st.session_state._odoo_name_field = name_field or "name"
+
+                    # A4: fetch partner IDs from address_home_id
+                    with st.spinner("Obteniendo partners desde Odoo..."):
+                        partner_ids_by_worker = fetch_partner_ids_by_worker(odoo, matches)
+                        st.session_state.partner_ids_by_worker = partner_ids_by_worker
+
+                    # A1: check which 465 accounts exist in Odoo, then rebuild employee_rows
+                    with st.spinner("Verificando cuentas 465 en Odoo..."):
+                        existing_465 = check_existing_465_accounts(odoo)
+                        st.session_state.existing_465_accounts = existing_465
+
+                    # A2: build dept_by_worker from matched department data
+                    dept_by_worker: dict[str, str] = {
+                        str(m.worker_number): m.department or ""
+                        for m in matches
+                        if m.department
+                    }
+                    st.session_state.dept_by_worker = dept_by_worker
+
+                    # Rebuild employee_rows with Odoo-enriched data (A1 + A2 + A3 + B3)
+                    updated_rows = build_employee_rows(
+                        st.session_state.excel_employees,
+                        st.session_state.pdf_pages,
+                        center_ccc_config=center_ccc_config,
+                        ss_accounts_by_center=ss_accounts_by_center,
+                        salary_account_by_dept=salary_account_by_dept,
+                        dept_by_worker=dept_by_worker,
+                        existing_465_accounts=existing_465 if existing_465 else None,
+                    )
+                    # Preserve any user overrides from a custom mapping
+                    if st.session_state.get("employee_rows"):
+                        old_rows_by_worker = {str(r["n_trabajador"]): r for r in st.session_state.employee_rows}
+                        for row in updated_rows:
+                            old = old_rows_by_worker.get(str(row["n_trabajador"]))
+                            if old and old.get("_custom_mapped"):
+                                row.update({k: v for k, v in old.items() if k != "_custom_mapped"})
+                    st.session_state.employee_rows = updated_rows
+
                 st.rerun()
 
         if st.session_state.odoo_matches:
@@ -696,6 +833,7 @@ with st.expander("3) Emparejar empleados con Odoo", expanded=False):
                         "archivo_pdf": m.filename,
                         "employee_id_odoo": m.employee_id_odoo,
                         "employee_name_odoo": m.employee_name_odoo,
+                        "departamento": m.department or "",
                         "criterio_match": m.match_method,
                         "estado_match": m.match_status,
                         "observaciones": m.observations,
@@ -788,8 +926,8 @@ with st.expander("4) Subir nominas individuales a Odoo", expanded=False):
             log_df = pd.DataFrame(
                 [
                     {
-                        "archivo_pdf": r.filename,
                         "n_trabajador": r.worker_number,
+                        "archivo_pdf": r.filename,
                         "dni": mask_dni(r.dni) if r.dni else "",
                         "employee_id_odoo": r.employee_id_odoo,
                         "employee_name_odoo": r.employee_name_odoo,
@@ -831,8 +969,85 @@ with st.expander("5) Crear asiento contable de nomina en Odoo", expanded=False):
     if not st.session_state.get("_odoo_connected"):
         st.info("Primero conecta con Odoo.")
     else:
+        # ── Sub-paso 5a: Generar borrador ────────────────────────────────────
+        st.markdown("#### 5a · Generar y descargar borrador del asiento")
+        st.caption("Descarga el Excel, revisalo y editalo si necesitas ajustar cuentas, importes o añadir embargos.")
+
+        if st.button("Generar borrador asiento (Excel)", key="gen_draft"):
+            _moves_for_draft = build_payroll_moves_by_center(
+                employees=st.session_state.excel_employees,
+                employee_rows=st.session_state.employee_rows,
+                month=month,
+                year=year,
+                aggregate_ss=aggregate_ss,
+            )
+            if not _moves_for_draft:
+                st.warning("No se encontraron lineas para el borrador.")
+            else:
+                draft_bytes = generate_move_draft_xlsx(_moves_for_draft)
+                st.session_state.move_draft_bytes = draft_bytes
+                st.session_state.move_draft_lines_by_center = _moves_for_draft
+                st.success(f"Borrador generado: {sum(len(v) for v in _moves_for_draft.values())} lineas en {len(_moves_for_draft)} centro(s).")
+
+        if st.session_state.get("move_draft_bytes"):
+            st.download_button(
+                "Descargar borrador asiento.xlsx",
+                data=st.session_state.move_draft_bytes,
+                file_name=f"borrador_asiento_nomina_{year}_{month:02d}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_draft",
+            )
+
+        st.divider()
+
+        # ── Sub-paso 5b: Subir borrador revisado (opcional) ──────────────────
+        st.markdown("#### 5b · Subir borrador revisado (opcional)")
+        st.caption("Si no subes nada se usan las lineas calculadas automaticamente.")
+        draft_upload = st.file_uploader("Borrador editado (.xlsx)", type=["xlsx"], key="draft_upload")
+
+        lines_to_use_by_center: dict[str, list[dict]] = {}
+        using_custom_draft = False
+
+        if draft_upload:
+            with tempfile.TemporaryDirectory() as _tmpdir:
+                _draft_path = Path(_tmpdir) / "draft.xlsx"
+                _draft_path.write_bytes(draft_upload.getvalue())
+                try:
+                    lines_to_use_by_center = read_move_draft_xlsx(_draft_path)
+                    using_custom_draft = True
+                    total_lines = sum(len(v) for v in lines_to_use_by_center.values())
+                    st.success(f"Borrador cargado: {total_lines} lineas en {len(lines_to_use_by_center)} centro(s).")
+                    for _center, _lines in lines_to_use_by_center.items():
+                        _smry = summarize_move_lines(_lines)
+                        _bal = _smry["balance"]
+                        _balanced = abs(_bal) < 0.01
+                        _msg = f"**{_center}** — Debe: {_smry['total_debit']:.2f} / Haber: {_smry['total_credit']:.2f} / Dif: {_bal:.2f}"
+                        if _balanced:
+                            st.success(_msg + " ✓")
+                        else:
+                            st.warning(_msg + " — ASIENTO NO CUADRADO")
+                except Exception as _exc:
+                    st.error(f"No se pudo leer el borrador: {_exc}")
+        else:
+            lines_to_use_by_center = st.session_state.get("move_draft_lines_by_center") or build_payroll_moves_by_center(
+                employees=st.session_state.excel_employees,
+                employee_rows=st.session_state.employee_rows,
+                month=month,
+                year=year,
+                aggregate_ss=aggregate_ss,
+            )
+
+        st.divider()
+
+        # ── Sub-paso 5c: Crear en Odoo ────────────────────────────────────────
+        st.markdown("#### 5c · Crear asiento en Odoo")
+        if using_custom_draft:
+            st.info("Se usaran las lineas del borrador subido.")
+        else:
+            st.info("Se usaran las lineas calculadas automaticamente.")
+
         dry_run_move = st.checkbox(
-            "Modo simulacion asiento: no crear asiento real",
+            "Modo simulacion: no crear asiento real",
             value=True,
             key="dry_run_payroll_move",
         )
@@ -840,20 +1055,14 @@ with st.expander("5) Crear asiento contable de nomina en Odoo", expanded=False):
 
         if create_move:
             odoo: OdooClient = st.session_state._odoo_client
-            with st.spinner("Preparando asientos contables..." if dry_run_move else "Creando asientos en Odoo..."):
-                moves_by_center = build_payroll_moves_by_center(
-                    employees=st.session_state.excel_employees,
-                    employee_rows=st.session_state.employee_rows,
-                    month=month,
-                    year=year,
-                    aggregate_ss=aggregate_ss,
-                )
+            _partner_ids_by_worker = st.session_state.get("partner_ids_by_worker") or {}
 
-                if not moves_by_center:
-                    st.warning("No se encontraron centros de trabajo con empleados para generar asientos.")
-                else:
+            if not lines_to_use_by_center:
+                st.warning("No se encontraron centros de trabajo con empleados para generar asientos.")
+            else:
+                with st.spinner("Preparando asientos..." if dry_run_move else "Creando asientos en Odoo..."):
                     results_by_center: dict[str, dict] = {}
-                    for center_name, center_lines in moves_by_center.items():
+                    for center_name, center_lines in lines_to_use_by_center.items():
                         center_label = center_name if center_name else "Sin centro"
                         center_reference = f"{reference} - {center_label}" if center_label != "Sin centro" else reference
                         res = create_payroll_move_in_odoo(
@@ -863,14 +1072,13 @@ with st.expander("5) Crear asiento contable de nomina en Odoo", expanded=False):
                             journal=journal,
                             reference=center_reference,
                             dry_run=dry_run_move,
+                            partner_ids_by_worker=_partner_ids_by_worker,
                         )
                         results_by_center[center_label] = {
                             "result": res,
                             "lines": center_lines,
                         }
-
                     st.session_state.odoo_move_results = results_by_center
-
             st.rerun()
 
         if st.session_state.get("odoo_move_results"):
@@ -893,7 +1101,7 @@ with st.expander("5) Crear asiento contable de nomina en Odoo", expanded=False):
                             f"impuesto IRPF={'OK' if tax_ok else 'NO'}, "
                             f"mod111[02]={'OK' if t02_ok else 'NO'}, "
                             f"mod111[03]={'OK' if t03_ok else 'NO'}. "
-                            "Las lineas se crearán sin etiquetas fiscales para Modelo 111."
+                            "Las lineas se crearan sin etiquetas fiscales para Modelo 111."
                         )
                 elif status == "CREADO":
                     st.success(move_result.get("message", "Asiento creado correctamente."))
@@ -999,9 +1207,9 @@ with st.expander("6) Solicitudes de firma movil", expanded=False):
                 wa_link = build_whatsapp_url(telefono, wa_message) if telefono else ""
                 created_rows.append(
                     {
-                        "request_id": req_id,
-                        "empleado": str(match.employee_name_odoo or ""),
                         "n_trabajador": str(match.worker_number),
+                        "empleado": str(match.employee_name_odoo or ""),
+                        "request_id": req_id,
                         "telefono": telefono,
                         "origen_telefono": origen_telefono,
                         "link_firma": sign_link,
@@ -1067,12 +1275,7 @@ st.divider()
 
 if st.button("Limpiar resultados / iniciar nuevo procesamiento"):
     clear_processing_state()
-    if "_odoo_client" in st.session_state:
-        del st.session_state["_odoo_client"]
-    if "_odoo_connected" in st.session_state:
-        del st.session_state["_odoo_connected"]
-    if "_warnings" in st.session_state:
-        del st.session_state["_warnings"]
-    if "odoo_move_results" in st.session_state:
-        del st.session_state["odoo_move_results"]
+    for _k in ["_odoo_client", "_odoo_connected", "_warnings"]:
+        if _k in st.session_state:
+            del st.session_state[_k]
     st.rerun()

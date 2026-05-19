@@ -266,6 +266,48 @@ def _resolve_account_ids(odoo: OdooClient, codes: list[str]) -> dict[str, int]:
     return result
 
 
+def fetch_partner_ids_by_worker(odoo: OdooClient, matches: list) -> dict[str, int]:
+    """Returns worker_number → res.partner id using address_home_id from hr.employee."""
+    result: dict[str, int] = {}
+    employee_ids = [
+        m.employee_id_odoo
+        for m in matches
+        if getattr(m, "employee_id_odoo", None) and getattr(m, "match_status", "") == "MATCH_OK"
+    ]
+    if not employee_ids:
+        return result
+    id_to_worker = {
+        m.employee_id_odoo: str(m.worker_number)
+        for m in matches
+        if getattr(m, "employee_id_odoo", None)
+    }
+    try:
+        rows = odoo.read("hr.employee", employee_ids, ["id", "address_home_id"])
+        for row in rows:
+            addr = row.get("address_home_id")
+            if isinstance(addr, (list, tuple)) and len(addr) >= 1 and addr[0]:
+                wn = id_to_worker.get(int(row["id"]))
+                if wn:
+                    result[wn] = int(addr[0])
+    except Exception:
+        pass
+    return result
+
+
+def check_existing_465_accounts(odoo: OdooClient) -> set[str]:
+    """Returns the set of account codes matching 4651% that exist in Odoo."""
+    try:
+        rows = odoo.search_read(
+            "account.account",
+            [("code", "like", "4651%")],
+            ["code"],
+            limit=500,
+        )
+        return {str(r["code"]).strip() for r in rows if r.get("code")}
+    except Exception:
+        return set()
+
+
 def _resolve_partner_ids(odoo: OdooClient, names: list[str]) -> dict[str, int]:
     uniq_names = sorted({str(name).strip() for name in names if str(name).strip()})
     result: dict[str, int] = {}
@@ -321,6 +363,7 @@ def create_payroll_move_in_odoo(
     journal: str,
     reference: str,
     dry_run: bool = True,
+    partner_ids_by_worker: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     summary = summarize_move_lines(lines)
     if not lines:
@@ -359,7 +402,11 @@ def create_payroll_move_in_odoo(
             "debit": float(line.get("debit", 0) or 0),
             "credit": float(line.get("credit", 0) or 0),
         }
-        if partner_name and partner_name in partner_ids:
+        # A4: prefer address_home_id-based partner when available
+        worker_number = str(line.get("worker_number", "")).strip()
+        if partner_ids_by_worker and worker_number and worker_number in partner_ids_by_worker:
+            values["partner_id"] = partner_ids_by_worker[worker_number]
+        elif partner_name and partner_name in partner_ids:
             values["partner_id"] = partner_ids[partner_name]
 
         # Etiquetas fiscales Modelo 111

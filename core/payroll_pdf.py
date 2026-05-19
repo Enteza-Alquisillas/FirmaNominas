@@ -97,7 +97,11 @@ def split_pdf_to_zip(
             month = page_info.month or default_month
             year = page_info.year or default_year
             base = page_info.dni or f"trabajador_{page_info.worker_number or page_info.page_index + 1:>03}"
-            filename = f"{slugify_filename(base)}-{month:02d}-{year:04d}.pdf"
+            nombre_slug = slugify_filename(page_info.employee_name or "")
+            if nombre_slug and nombre_slug != "sin_nombre":
+                filename = f"{slugify_filename(base)}-{nombre_slug}-{month:02d}-{year:04d}.pdf"
+            else:
+                filename = f"{slugify_filename(base)}-{month:02d}-{year:04d}.pdf"
             filename = unique_filename(filename, used_names)
             used_names.add(filename)
             zf.writestr(filename, page_buf.getvalue())

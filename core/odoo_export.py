@@ -10,6 +10,8 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from pathlib import Path
+
 from .payroll_excel import PayrollEmployee
 from .payroll_pdf import PayslipPage
 from .utils import decimal_to_float, is_zero, money, safe_account_465
@@ -28,13 +30,59 @@ DEFAULTS = {
 }
 
 
-def build_employee_rows(employees: list[PayrollEmployee], pdf_pages: list[PayslipPage]) -> list[dict[str, Any]]:
+def _ccc_to_465_prefix(ccc_suffix: str) -> str:
+    """Returns 46500 or 46510 based on last 3 digits of CCC."""
+    s = str(ccc_suffix).strip()
+    if s.endswith("375"):
+        return "46500"
+    if s.endswith("213"):
+        return "46510"
+    return "46510"
+
+
+def build_employee_rows(
+    employees: list[PayrollEmployee],
+    pdf_pages: list[PayslipPage],
+    center_ccc_config: dict[str, str] | None = None,
+    ss_accounts_by_center: dict[str, str] | None = None,
+    salary_account_by_dept: dict[str, str] | None = None,
+    dept_by_worker: dict[str, str] | None = None,
+    existing_465_accounts: set[str] | None = None,
+) -> list[dict[str, Any]]:
     pdf_by_worker = {p.worker_number: p for p in pdf_pages if p.worker_number}
     rows: list[dict[str, Any]] = []
     for emp in employees:
         if emp.center and "TOTAL" in emp.center.upper():
             continue
         pdf = pdf_by_worker.get(emp.worker_number)
+
+        # B3: Determine 465 prefix from center→CCC config
+        prefix_465 = "46510"
+        if center_ccc_config and emp.center:
+            ccc_suffix = center_ccc_config.get(emp.center, "")
+            if ccc_suffix:
+                prefix_465 = _ccc_to_465_prefix(ccc_suffix)
+
+        # A1: Use specific 46510xxx if it exists in Odoo, else fallback to 46500000
+        cuenta_465_candidate = safe_account_465(emp.worker_number, prefix_465)
+        if existing_465_accounts is not None:
+            cuenta_remuneraciones = cuenta_465_candidate if cuenta_465_candidate in existing_465_accounts else "46500000"
+        else:
+            cuenta_remuneraciones = cuenta_465_candidate
+
+        # A3: SS empresa account by center
+        if ss_accounts_by_center and emp.center:
+            cuenta_ss = ss_accounts_by_center.get(emp.center, DEFAULTS["account_ss_company"])
+        else:
+            cuenta_ss = DEFAULTS["account_ss_company"]
+
+        # A2: 640 account by department
+        dept = (dept_by_worker or {}).get(emp.worker_number, "")
+        if salary_account_by_dept and dept:
+            cuenta_sueldos = salary_account_by_dept.get(dept, DEFAULTS["account_salary"])
+        else:
+            cuenta_sueldos = DEFAULTS["account_salary"]
+
         rows.append(
             {
                 "incluir": "SI",
@@ -43,9 +91,9 @@ def build_employee_rows(employees: list[PayrollEmployee], pdf_pages: list[Paysli
                 "nombre_excel": emp.name,
                 "nombre_pdf": pdf.employee_name if pdf else "",
                 "centro": emp.center or "",
-                "cuenta_sueldos": DEFAULTS["account_salary"],
-                "cuenta_ss_empresa": DEFAULTS["account_ss_company"],
-                "cuenta_remuneraciones": safe_account_465(emp.worker_number),
+                "cuenta_sueldos": cuenta_sueldos,
+                "cuenta_ss_empresa": cuenta_ss,
+                "cuenta_remuneraciones": cuenta_remuneraciones,
                 "cuenta_irpf": DEFAULTS["account_irpf"],
                 "cuenta_ss_acreedora": DEFAULTS["account_ss_creditor"],
                 "cuenta_embargo": DEFAULTS["account_embargo"],
@@ -280,3 +328,61 @@ def _save_bytes(wb: Workbook) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+# A6 ─ Borrador de asiento editable
+
+DRAFT_COLUMNS = ["centro", "account_code", "partner_name", "name", "debit", "credit", "line_role", "worker_number"]
+
+
+def generate_move_draft_xlsx(lines_by_center: dict[str, list[dict]]) -> bytes:
+    """Generates a draft Excel with one sheet per center so the user can edit it."""
+    wb = Workbook()
+    wb.remove(wb.active)  # type: ignore[arg-type]
+
+    instructions = wb.create_sheet("instrucciones", 0)
+    instructions.append(["Campo", "Descripcion"])
+    instructions.append(["centro", "Centro de trabajo (no modificar)"])
+    instructions.append(["account_code", "Codigo de cuenta contable tal como aparece en Odoo"])
+    instructions.append(["partner_name", "Nombre del partner/empleado en Odoo (puede dejarse en blanco)"])
+    instructions.append(["name", "Descripcion de la linea del asiento"])
+    instructions.append(["debit", "Importe al debe (0 si es linea de haber)"])
+    instructions.append(["credit", "Importe al haber (0 si es linea de debe)"])
+    instructions.append(["line_role", "Rol: salary, ss_company, remuneration, irpf, embargo, manual, etc."])
+    instructions.append(["worker_number", "Numero de trabajador (referencia interna)"])
+    instructions.append([])
+    instructions.append(["NOTA", "Puedes anadir filas extra. Usa line_role=manual para lineas sin etiqueta fiscal automatica."])
+    _format_sheet(instructions)
+
+    for center_name, lines in lines_by_center.items():
+        safe_name = str(center_name or "Sin_centro")[:31]
+        ws = wb.create_sheet(safe_name)
+        ws.append(DRAFT_COLUMNS)
+        for line in lines:
+            ws.append([line.get(col, "") for col in DRAFT_COLUMNS])
+        _format_sheet(ws)
+
+    return _save_bytes(wb)
+
+
+def read_move_draft_xlsx(xlsx_path: str | Path) -> dict[str, list[dict]]:
+    """Reads a user-edited draft Excel back into lines grouped by center."""
+    wb = load_workbook(filename=xlsx_path, data_only=True)
+    result: dict[str, list[dict]] = {}
+    for sheet_name in wb.sheetnames:
+        if sheet_name == "instrucciones":
+            continue
+        ws = wb[sheet_name]
+        headers = [str(cell.value).strip() if cell.value is not None else "" for cell in ws[1]]
+        lines: list[dict] = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not any(v for v in row):
+                continue
+            record: dict = {headers[i]: (row[i] if i < len(row) else "") for i in range(len(headers))}
+            # Ensure numeric fields are float
+            record["debit"] = float(record.get("debit") or 0)
+            record["credit"] = float(record.get("credit") or 0)
+            lines.append(record)
+        if lines:
+            result[sheet_name] = lines
+    return result

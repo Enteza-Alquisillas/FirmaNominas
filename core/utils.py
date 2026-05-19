@@ -81,12 +81,12 @@ def is_zero(value: Decimal) -> bool:
     return money(value) == Decimal("0.00")
 
 
-def safe_account_465(worker_number: str | int) -> str:
-    """Default account convention observed in the supplied Odoo screenshot: 46510 + 3-digit worker number."""
+def safe_account_465(worker_number: str | int, prefix: str = "46510") -> str:
+    """Build 465 account: prefix + 3-digit worker number. Prefix is 46510 or 46500 depending on CCC."""
     try:
-        return f"46510{int(worker_number):03d}"
+        return f"{prefix}{int(worker_number):03d}"
     except Exception:
-        return "46510000"
+        return f"{prefix}000"
 
 
 def normalize_concept(value: str) -> str:

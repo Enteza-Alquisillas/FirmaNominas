@@ -37,13 +37,15 @@ def match_employees(
     worker_field: str | None,
     name_field: str = "name",
 ) -> list[OdooEmployeeMatch]:
-    all_employees = odoo.search_employees([], fields=["id", name_field, dni_field, "active"])
+    base_fields = ["id", name_field, dni_field, "active", "department_id"]
     if worker_field:
         all_employees = odoo.search_employees(
             [],
-            fields=["id", name_field, dni_field, worker_field, "active"],
+            fields=base_fields + [worker_field],
             limit=5000,
         )
+    else:
+        all_employees = odoo.search_employees([], fields=base_fields, limit=5000)
 
     employee_by_dni: dict[str, list[dict]] = {}
     employee_by_worker: dict[str, list[dict]] = {}
@@ -69,6 +71,13 @@ def match_employees(
         key=lambda x: int(x) if x.isdigit() else 0,
     )
 
+    # Build department lookup: employee_id → department name
+    dept_by_id: dict[int, str] = {}
+    for emp in all_employees:
+        dept_raw = emp.get("department_id")
+        dept_name = dept_raw[1] if isinstance(dept_raw, (list, tuple)) and len(dept_raw) >= 2 else ""
+        dept_by_id[int(emp["id"])] = dept_name
+
     results: list[OdooEmployeeMatch] = []
 
     for wn in all_worker_numbers:
@@ -92,6 +101,9 @@ def match_employees(
             worker_field=worker_field,
             name_field=name_field,
         )
+
+        if match.employee_id_odoo and match.employee_id_odoo in dept_by_id:
+            match.department = dept_by_id[match.employee_id_odoo]
 
         results.append(match)
 

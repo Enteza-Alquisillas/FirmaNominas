@@ -50,6 +50,7 @@ class OdooEmployeeMatch:
     match_method: str
     match_status: str
     observations: str
+    department: str | None = None
 
 
 @dataclass
