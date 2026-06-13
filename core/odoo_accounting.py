@@ -274,30 +274,70 @@ def _resolve_account_ids(odoo: OdooClient, codes: list[str]) -> dict[str, int]:
 
 
 def fetch_partner_ids_by_worker(odoo: OdooClient, matches: list) -> dict[str, int]:
-    """Returns worker_number → res.partner id using address_home_id from hr.employee."""
+    """Returns worker_number → res.partner id for the employee identificado en Odoo.
+
+    Orden de resolucion:
+      1. ``hr.employee.address_home_id`` (contacto particular del empleado).
+      2. ``hr.employee.work_contact_id`` (si el campo existe en esta version de Odoo).
+      3. Busqueda exacta en ``res.partner`` por el nombre del empleado en Odoo.
+    """
     result: dict[str, int] = {}
-    employee_ids = [
-        m.employee_id_odoo
+    ok_matches = [
+        m
         for m in matches
         if getattr(m, "employee_id_odoo", None) and getattr(m, "match_status", "") == "MATCH_OK"
     ]
-    if not employee_ids:
+    if not ok_matches:
         return result
-    id_to_worker = {
-        m.employee_id_odoo: str(m.worker_number)
-        for m in matches
-        if getattr(m, "employee_id_odoo", None)
+
+    employee_ids = [m.employee_id_odoo for m in ok_matches]
+    id_to_worker = {m.employee_id_odoo: str(m.worker_number) for m in ok_matches}
+    id_to_name = {
+        m.employee_id_odoo: (m.employee_name_odoo or m.employee_name_excel or m.employee_name_pdf)
+        for m in ok_matches
     }
+
+    fields = ["id", "address_home_id"]
     try:
-        rows = odoo.read("hr.employee", employee_ids, ["id", "address_home_id"])
-        for row in rows:
-            addr = row.get("address_home_id")
-            if isinstance(addr, (list, tuple)) and len(addr) >= 1 and addr[0]:
-                wn = id_to_worker.get(int(row["id"]))
-                if wn:
-                    result[wn] = int(addr[0])
+        emp_fields = odoo.fields_get("hr.employee")
+        if "work_contact_id" in emp_fields:
+            fields.append("work_contact_id")
     except Exception:
         pass
+
+    try:
+        rows = odoo.read("hr.employee", employee_ids, fields)
+    except Exception:
+        rows = []
+
+    missing_ids: list[int] = []
+    for row in rows:
+        emp_id = int(row["id"])
+        wn = id_to_worker.get(emp_id)
+        if not wn:
+            continue
+        addr = row.get("address_home_id")
+        if isinstance(addr, (list, tuple)) and len(addr) >= 1 and addr[0]:
+            result[wn] = int(addr[0])
+            continue
+        work_contact = row.get("work_contact_id")
+        if isinstance(work_contact, (list, tuple)) and len(work_contact) >= 1 and work_contact[0]:
+            result[wn] = int(work_contact[0])
+            continue
+        missing_ids.append(emp_id)
+
+    for emp_id in missing_ids:
+        wn = id_to_worker.get(emp_id)
+        name = (id_to_name.get(emp_id) or "").strip()
+        if not wn or not name:
+            continue
+        try:
+            partner_rows = odoo.search_read("res.partner", [("name", "=", name)], ["id"], limit=1)
+        except Exception:
+            partner_rows = []
+        if partner_rows:
+            result[wn] = int(partner_rows[0]["id"])
+
     return result
 
 
@@ -398,6 +438,7 @@ def create_payroll_move_in_odoo(
     irpf_tax_id, tag_mod111_02, tag_mod111_03 = _resolve_irpf_tax_and_tags(odoo)
 
     move_lines: list[tuple[int, int, dict[str, Any]]] = []
+    missing_465_partners: list[str] = []
     for line in lines:
         account_code = str(line.get("account_code", "")).strip()
         partner_name = str(line.get("partner_name", "")).strip()
@@ -411,10 +452,17 @@ def create_payroll_move_in_odoo(
         }
         # A4: prefer address_home_id-based partner when available
         worker_number = str(line.get("worker_number", "")).strip()
+        resolved_partner_id: int | None = None
         if partner_ids_by_worker and worker_number and worker_number in partner_ids_by_worker:
-            values["partner_id"] = partner_ids_by_worker[worker_number]
+            resolved_partner_id = partner_ids_by_worker[worker_number]
         elif partner_name and partner_name in partner_ids:
-            values["partner_id"] = partner_ids[partner_name]
+            resolved_partner_id = partner_ids[partner_name]
+
+        if resolved_partner_id:
+            values["partner_id"] = resolved_partner_id
+        elif account_code.startswith("465"):
+            employee_name = str(line.get("employee_name", "")).strip()
+            missing_465_partners.append(f"{worker_number} {employee_name}".strip())
 
         # Etiquetas fiscales Modelo 111
         if role == "salary":
@@ -429,6 +477,18 @@ def create_payroll_move_in_odoo(
                 values["tax_tag_ids"] = [(6, 0, [tag_mod111_03])]
 
         move_lines.append((0, 0, values))
+
+    if missing_465_partners:
+        return {
+            "status": "ERROR",
+            "message": (
+                "No se pudo determinar el contacto (Empresa) para las lineas de cuenta 465 de: "
+                + ", ".join(sorted(set(missing_465_partners)))
+                + ". Comprueba que el empleado tenga 'address_home_id' o un contacto con el mismo "
+                "nombre en Odoo."
+            ),
+            "summary": summary,
+        }
 
     payload = {
         "move_type": "entry",
