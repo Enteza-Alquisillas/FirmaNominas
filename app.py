@@ -288,6 +288,33 @@ def _handle_sign_submit(request: dict, canvas_result, pdf_path: Path) -> None:
         st.error(f"No se pudo completar la firma/subida: {exc}")
 
 
+def _render_kv_map_inputs(
+    title: str,
+    caption: str,
+    n_label: str,
+    n_key: str,
+    key_prefix: str,
+    placeholder_key: str,
+    placeholder_val: str,
+    initial: dict[str, str],
+) -> dict[str, str]:
+    """Render a pair of columns (key/value) N times and return the populated dict."""
+    st.markdown(title)
+    if caption:
+        st.caption(caption)
+    n = int(st.number_input(n_label, 0, 8, 2, step=1, key=n_key))
+    result = dict(initial)
+    for i in range(n):
+        c1, c2 = st.columns(2)
+        with c1:
+            k = st.text_input(f"{placeholder_key} {i+1}", key=f"{key_prefix}_k_{i}", placeholder=placeholder_key)
+        with c2:
+            v = st.text_input(placeholder_val, key=f"{key_prefix}_v_{i}", placeholder=placeholder_val)
+        if k.strip() and v.strip():
+            result[k.strip()] = v.strip()
+    return result
+
+
 def _render_public_sign_page(token_value: str) -> None:
     st.title("Firma de nomina")
     st.caption("Firma manuscrita desde movil")
@@ -394,33 +421,6 @@ with st.sidebar:
         "4. Descarga el ZIP de nominas y el Excel de importacion Odoo.\n"
         "5. Conecta con Odoo y sube las nominas individuales."
     )
-
-
-def _render_kv_map_inputs(
-    title: str,
-    caption: str,
-    n_label: str,
-    n_key: str,
-    key_prefix: str,
-    placeholder_key: str,
-    placeholder_val: str,
-    initial: dict[str, str],
-) -> dict[str, str]:
-    """Render a pair of columns (key/value) N times and return the populated dict."""
-    st.markdown(title)
-    if caption:
-        st.caption(caption)
-    n = int(st.number_input(n_label, 0, 8, 2, step=1, key=n_key))
-    result = dict(initial)
-    for i in range(n):
-        c1, c2 = st.columns(2)
-        with c1:
-            k = st.text_input(f"{placeholder_key} {i+1}", key=f"{key_prefix}_k_{i}", placeholder=placeholder_key)
-        with c2:
-            v = st.text_input(placeholder_val, key=f"{key_prefix}_v_{i}", placeholder=placeholder_val)
-        if k.strip() and v.strip():
-            result[k.strip()] = v.strip()
-    return result
 
 
 def file_hash(data: bytes) -> str:
