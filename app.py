@@ -15,7 +15,7 @@ import streamlit.components.v1 as components
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
-from core.odoo_attachments import delete_unsigned_attachment, upload_all_payslips
+from core.odoo_attachments import delete_unsigned_attachment, upload_all_payslips, upload_employee_payslip_attachment
 from core.odoo_accounting import (
     build_payroll_move_lines,
     build_payroll_moves_by_center,
@@ -39,7 +39,7 @@ from core.odoo_export import (
     read_move_draft_xlsx,
 )
 from core.payroll_excel import parse_payroll_excel
-from core.payroll_pdf import extract_pdf_pages, split_pdf_to_zip
+from core.payroll_pdf import build_payslip_filename, extract_pdf_pages, split_pdf_to_zip
 from core.signature_delivery import (
     build_sign_link,
     build_whatsapp_url,
@@ -62,6 +62,7 @@ from core.signature_repository import (
 from core.signature_tokens import create_token, expires_at, is_expired, token_hash
 from core.state import clear_processing_state, init_state
 from core.utils import mask_dni
+from pypdf import PdfReader, PdfWriter
 
 _LOGO_PATH = Path(__file__).parent / "logo-enteza.png"
 _logo_img = Image.open(_LOGO_PATH) if _LOGO_PATH.exists() else None
@@ -93,6 +94,20 @@ def _parse_kv_map(raw: str) -> dict[str, str]:
     return result
 
 
+def _parse_env_file(env_path: Path) -> dict[str, str]:
+    """Parse a .env-style file into a dict of key→value pairs."""
+    result: dict[str, str] = {}
+    if not env_path.exists():
+        return result
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        result[key.strip()] = value.strip().strip('"').strip("'")
+    return result
+
+
 def load_odoo_config_from_env_file() -> dict[str, str]:
     config: dict[str, str] = {
         "url": "",
@@ -103,61 +118,29 @@ def load_odoo_config_from_env_file() -> dict[str, str]:
         "ss_account_map": "",
         "dept_640_map": "",
     }
-    env_path = Path(".env.local")
-    if env_path.exists():
-        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key == "ODOO_URL":
-                config["url"] = value
-            elif key == "ODOO_DB":
-                config["db"] = value
-            elif key == "ODOO_USER":
-                config["username"] = value
-            elif key == "ODOO_PASSWORD":
-                config["password"] = value
-            elif key == "CENTER_CCC_MAP":
-                config["center_ccc_map"] = value
-            elif key == "SS_ACCOUNT_MAP":
-                config["ss_account_map"] = value
-            elif key == "DEPT_640_MAP":
-                config["dept_640_map"] = value
-
-    for env_key, cfg_key in [
-        ("ODOO_URL", "url"),
-        ("ODOO_DB", "db"),
-        ("ODOO_USER", "username"),
-        ("ODOO_PASSWORD", "password"),
-        ("CENTER_CCC_MAP", "center_ccc_map"),
-        ("SS_ACCOUNT_MAP", "ss_account_map"),
-        ("DEPT_640_MAP", "dept_640_map"),
-    ]:
+    env = _parse_env_file(Path(__file__).parent / ".env.local")
+    mapping = {
+        "ODOO_URL": "url",
+        "ODOO_DB": "db",
+        "ODOO_USER": "username",
+        "ODOO_PASSWORD": "password",
+        "CENTER_CCC_MAP": "center_ccc_map",
+        "SS_ACCOUNT_MAP": "ss_account_map",
+        "DEPT_640_MAP": "dept_640_map",
+    }
+    for env_key, cfg_key in mapping.items():
+        if env.get(env_key):
+            config[cfg_key] = env[env_key]
         if os.getenv(env_key):
             config[cfg_key] = os.getenv(env_key, "")
-
     return config
 
 
 def load_sign_base_url_from_env_file() -> str:
-    env_path = Path(__file__).parent / ".env.local"
-    value = ""
-    if env_path.exists():
-        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, raw_value = line.split("=", 1)
-            if key.strip() == "SIGN_BASE_URL":
-                value = raw_value.strip().strip('"').strip("'")
-                break
-
+    env = _parse_env_file(Path(__file__).parent / ".env.local")
+    value = env.get("SIGN_BASE_URL", "")
     if os.getenv("SIGN_BASE_URL"):
         value = os.getenv("SIGN_BASE_URL", "")
-
     return value.strip()
 
 
@@ -428,8 +411,6 @@ def file_hash(data: bytes) -> str:
 def build_split_pdfs_dict(
     pdf_path: Path, pdf_pages, default_month: int, default_year: int
 ) -> tuple[dict[str, bytes], dict[str, str]]:
-    from pypdf import PdfReader, PdfWriter
-
     reader = PdfReader(str(pdf_path))
     result: dict[str, bytes] = {}
     worker_to_filename: dict[str, str] = {}
@@ -440,16 +421,7 @@ def build_split_pdfs_dict(
         writer.add_page(reader.pages[page_info.page_index])
         page_buf = io.BytesIO()
         writer.write(page_buf)
-        month = page_info.month or default_month
-        year = page_info.year or default_year
-        base = page_info.dni or f"trabajador_{page_info.worker_number or page_info.page_index + 1:>03}"
-        from core.utils import slugify_filename
-
-        nombre_slug = slugify_filename(page_info.employee_name or "")
-        if nombre_slug and nombre_slug != "sin_nombre":
-            filename = f"{slugify_filename(base)}-{nombre_slug}-{month:02d}-{year:04d}.pdf"
-        else:
-            filename = f"{slugify_filename(base)}-{month:02d}-{year:04d}.pdf"
+        filename = build_payslip_filename(page_info, default_month, default_year)
         if filename in used_names:
             stem = filename[:-4]
             counter = 2
@@ -565,7 +537,7 @@ if not st.session_state.processed:
 
 month = st.session_state.period_month
 year = st.session_state.period_year
-warnings = getattr(st.session_state, "_warnings", {})
+warnings = st.session_state.get("_warnings", {})
 
 st.success(
     f"Periodo detectado: {month:02d}/{year}. "

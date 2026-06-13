@@ -1,30 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
+from .payroll_excel import PayrollEmployee  # re-export: canonical definition lives there
+from .payroll_pdf import PayslipPage  # re-export: canonical definition lives there
 
-@dataclass
-class PayslipPage:
-    page_index: int
-    worker_number: str | None
-    employee_name: str | None
-    dni: str | None
-    month: int | None
-    year: int | None
-    raw_period: str | None = None
-    text_preview: str = ""
-
-
-@dataclass
-class PayrollEmployee:
-    worker_number: str
-    name: str
-    center: str | None = None
-    concepts: dict[str, Any] = field(default_factory=dict)
-
-    def get(self, concept_name: str):
-        return self.concepts.get(concept_name, 0)
+__all__ = ["PayrollEmployee", "PayslipPage", "SplitPdfArtifact", "OdooEmployeeMatch", "UploadResult"]
 
 
 @dataclass

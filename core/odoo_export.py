@@ -10,8 +10,6 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from pathlib import Path
-
 from .payroll_excel import PayrollEmployee
 from .payroll_pdf import PayslipPage
 from .utils import decimal_to_float, is_zero, money, safe_account_465

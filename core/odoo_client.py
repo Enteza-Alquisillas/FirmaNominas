@@ -66,7 +66,7 @@ class OdooClient:
         model: str,
         domain: list,
         fields: list,
-        limit: int = 100,
+        limit: int = 5000,
     ) -> list[dict]:
         return self.execute_kw(
             model,

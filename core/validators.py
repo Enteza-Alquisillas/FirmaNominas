@@ -53,7 +53,7 @@ def validate_mapping_row(row: dict[str, Any]) -> list[str]:
         errors.append("Falta numero de trabajador")
 
     incluir = str(row.get("incluir", "SI")).upper()
-    if incluir not in ("SI", "NO", "S", "N", "YES", "NO"):
+    if incluir not in ("SI", "NO", "S", "N", "Y", "YES", "TRUE", "1"):
         errors.append(f"Valor de 'incluir' invalido: {incluir}")
 
     return errors

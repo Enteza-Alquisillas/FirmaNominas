@@ -71,6 +71,12 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_signature_requests_token_hash
+              ON signature_requests (token_hash)
+            """
+        )
         conn.commit()
     finally:
         conn.close()
