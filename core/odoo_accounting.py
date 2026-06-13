@@ -239,21 +239,28 @@ def _resolve_account_ids(odoo: OdooClient, codes: list[str]) -> dict[str, int]:
     result: dict[str, int] = {}
     prefix_cache: dict[str, int | None] = {}
 
-    for code in uniq_codes:
-        # 1. Búsqueda exacta
-        rows = odoo.search_read("account.account", [("code", "=", code)], ["id", "code"], limit=1)
-        if rows:
-            result[code] = int(rows[0]["id"])
-            continue
+    # 1. Batch exact lookup — single Odoo call for all codes at once
+    if uniq_codes:
+        rows = odoo.search_read(
+            "account.account",
+            [("code", "in", uniq_codes)],
+            ["id", "code"],
+            limit=len(uniq_codes),
+        )
+        for row in rows:
+            result[str(row["code"]).strip()] = int(row["id"])
 
-        # 2. Para cuentas 4651XXXX: buscar por prefijo 4650 (cuenta genérica de remuneraciones)
+    # 2. Prefix fallback only for codes not found by exact match
+    missing = [code for code in uniq_codes if code not in result]
+    for code in missing:
+        # 2a. Para cuentas 4651XXXX: buscar por prefijo 4650 (cuenta genérica de remuneraciones)
         if code.startswith("4651"):
             found = _prefix_search(odoo, "4650", prefix_cache)
             if found:
                 result[code] = found
                 continue
 
-        # 3. Búsqueda por prefijo progresivo (quitar dígito a dígito desde la derecha)
+        # 2b. Búsqueda por prefijo progresivo (quitar dígito a dígito desde la derecha)
         for trim in range(1, len(code)):
             prefix = code[:-trim]
             if len(prefix) < 3:
