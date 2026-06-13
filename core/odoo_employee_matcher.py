@@ -110,6 +110,35 @@ def match_employees(
     return results
 
 
+def _fallback_filename(dni: str, worker_number: str) -> str:
+    return f"{normalize_dni(dni) if dni else f'trabajador_{worker_number}'}.pdf"
+
+
+def _make_match(
+    worker_number: str, dni: str, name_pdf: str, name_excel: str,
+    filename: str, emp: dict, name_field: str, method: str, observations: str = "",
+) -> OdooEmployeeMatch:
+    return OdooEmployeeMatch(
+        worker_number=worker_number, dni=dni,
+        employee_name_pdf=name_pdf, employee_name_excel=name_excel,
+        filename=filename, employee_id_odoo=emp["id"],
+        employee_name_odoo=emp.get(name_field, ""),
+        match_method=method, match_status="MATCH_OK", observations=observations,
+    )
+
+
+def _make_ambiguous(
+    worker_number: str, dni: str, name_pdf: str, name_excel: str,
+    filename: str, method: str, observations: str,
+) -> OdooEmployeeMatch:
+    return OdooEmployeeMatch(
+        worker_number=worker_number, dni=dni,
+        employee_name_pdf=name_pdf, employee_name_excel=name_excel,
+        filename=filename, employee_id_odoo=None, employee_name_odoo=None,
+        match_method=method, match_status="AMBIGUO", observations=observations,
+    )
+
+
 def _find_match(
     dni: str,
     worker_number: str,
@@ -122,113 +151,38 @@ def _find_match(
     worker_field: str | None,
     name_field: str,
 ) -> OdooEmployeeMatch:
+    fallback_fn = _fallback_filename(dni, worker_number)
+
     if dni:
         norm_dni = normalize_dni(dni)
-        if norm_dni in employee_by_dni:
-            matches = employee_by_dni[norm_dni]
-            if len(matches) == 1:
-                emp = matches[0]
-                return OdooEmployeeMatch(
-                    worker_number=worker_number,
-                    dni=dni,
-                    employee_name_pdf=name_pdf,
-                    employee_name_excel=name_excel,
-                    filename=f"{norm_dni}.pdf",
-                    employee_id_odoo=emp["id"],
-                    employee_name_odoo=emp.get(name_field, ""),
-                    match_method="dni",
-                    match_status="MATCH_OK",
-                    observations="",
-                )
-            elif len(matches) > 1:
-                return OdooEmployeeMatch(
-                    worker_number=worker_number,
-                    dni=dni,
-                    employee_name_pdf=name_pdf,
-                    employee_name_excel=name_excel,
-                    filename=f"{norm_dni}.pdf",
-                    employee_id_odoo=None,
-                    employee_name_odoo=None,
-                    match_method="dni",
-                    match_status="AMBIGUO",
-                    observations=f"{len(matches)} empleados con mismo DNI",
-                )
+        candidates = employee_by_dni.get(norm_dni, [])
+        if len(candidates) == 1:
+            return _make_match(worker_number, dni, name_pdf, name_excel, f"{norm_dni}.pdf", candidates[0], name_field, "dni")
+        if len(candidates) > 1:
+            return _make_ambiguous(worker_number, dni, name_pdf, name_excel, f"{norm_dni}.pdf", "dni", f"{len(candidates)} empleados con mismo DNI")
 
     if worker_field:
         norm_worker = normalize_worker_number(worker_number)
-        if norm_worker in employee_by_worker:
-            matches = employee_by_worker[norm_worker]
-            if len(matches) == 1:
-                emp = matches[0]
-                return OdooEmployeeMatch(
-                    worker_number=worker_number,
-                    dni=dni,
-                    employee_name_pdf=name_pdf,
-                    employee_name_excel=name_excel,
-                    filename=f"{norm_dni if dni else f'trabajador_{worker_number}'}.pdf",
-                    employee_id_odoo=emp["id"],
-                    employee_name_odoo=emp.get(name_field, ""),
-                    match_method="worker_number",
-                    match_status="MATCH_OK",
-                    observations="",
-                )
-            elif len(matches) > 1:
-                return OdooEmployeeMatch(
-                    worker_number=worker_number,
-                    dni=dni,
-                    employee_name_pdf=name_pdf,
-                    employee_name_excel=name_excel,
-                    filename=f"{normalize_dni(dni) if dni else f'trabajador_{worker_number}'}.pdf",
-                    employee_id_odoo=None,
-                    employee_name_odoo=None,
-                    match_method="worker_number",
-                    match_status="AMBIGUO",
-                    observations=f"{len(matches)} empleados con mismo numero de trabajador",
-                )
+        candidates = employee_by_worker.get(norm_worker, [])
+        if len(candidates) == 1:
+            return _make_match(worker_number, dni, name_pdf, name_excel, fallback_fn, candidates[0], name_field, "worker_number")
+        if len(candidates) > 1:
+            return _make_ambiguous(worker_number, dni, name_pdf, name_excel, fallback_fn, "worker_number", f"{len(candidates)} empleados con mismo numero de trabajador")
 
     name_to_match = name_excel or name_pdf
     if name_to_match:
         norm_name = normalize_name(name_to_match)
-        if norm_name in employee_by_name:
-            matches = employee_by_name[norm_name]
-            if len(matches) == 1:
-                emp = matches[0]
-                return OdooEmployeeMatch(
-                    worker_number=worker_number,
-                    dni=dni,
-                    employee_name_pdf=name_pdf,
-                    employee_name_excel=name_excel,
-                    filename=f"{normalize_dni(dni) if dni else f'trabajador_{worker_number}'}.pdf",
-                    employee_id_odoo=emp["id"],
-                    employee_name_odoo=emp.get(name_field, ""),
-                    match_method="name",
-                    match_status="MATCH_OK",
-                    observations="Coincidencia por nombre (revisar)",
-                )
-            elif len(matches) > 1:
-                return OdooEmployeeMatch(
-                    worker_number=worker_number,
-                    dni=dni,
-                    employee_name_pdf=name_pdf,
-                    employee_name_excel=name_excel,
-                    filename=f"{normalize_dni(dni) if dni else f'trabajador_{worker_number}'}.pdf",
-                    employee_id_odoo=None,
-                    employee_name_odoo=None,
-                    match_method="name",
-                    match_status="AMBIGUO",
-                    observations=f"{len(matches)} empleados con mismo nombre",
-                )
+        candidates = employee_by_name.get(norm_name, [])
+        if len(candidates) == 1:
+            return _make_match(worker_number, dni, name_pdf, name_excel, fallback_fn, candidates[0], name_field, "name", "Coincidencia por nombre (revisar)")
+        if len(candidates) > 1:
+            return _make_ambiguous(worker_number, dni, name_pdf, name_excel, fallback_fn, "name", f"{len(candidates)} empleados con mismo nombre")
 
     return OdooEmployeeMatch(
-        worker_number=worker_number,
-        dni=dni,
-        employee_name_pdf=name_pdf,
-        employee_name_excel=name_excel,
-        filename=f"{normalize_dni(dni) if dni else f'trabajador_{worker_number}'}.pdf",
-        employee_id_odoo=None,
-        employee_name_odoo=None,
-        match_method="",
-        match_status="NO_ENCONTRADO",
+        worker_number=worker_number, dni=dni,
+        employee_name_pdf=name_pdf, employee_name_excel=name_excel,
+        filename=fallback_fn, employee_id_odoo=None, employee_name_odoo=None,
+        match_method="", match_status="NO_ENCONTRADO",
         observations="No se encontro coincidencia en Odoo",
     )
 

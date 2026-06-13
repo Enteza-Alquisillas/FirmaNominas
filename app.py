@@ -176,40 +176,12 @@ def _save_signature_image(signature_image_data, out_path: Path) -> bytes:
     return out_path.read_bytes()
 
 
-def _render_public_sign_page(token_value: str) -> None:
-    st.title("Firma de nomina")
-    st.caption("Firma manuscrita desde movil")
-
-    hashed = token_hash(token_value)
-    request = get_request_by_token_hash(hashed)
-    if not request:
-        st.error("Enlace invalido o no existente.")
-        return
-    if is_expired(request["token_expires_at"]):
-        st.error("Enlace expirado. Contacta con RRHH.")
-        return
-
-    if request["status"] == "uploaded_odoo":
-        st.success("Esta nomina ya fue firmada y enviada correctamente.")
-        return
-
-    mark_opened(request["id"])
-    add_event(request["id"], "opened_link", {})
-
-    pdf_path = Path(request["pdf_original_path"])
-    if not pdf_path.exists():
-        st.error("No se encontro el PDF de nomina para esta solicitud.")
-        return
-
-    st.write(f"Empleado: {request['employee_name']}")
-    st.write(f"Periodo: {int(request['period_month']):02d}/{int(request['period_year'])}")
-
-    pdf_bytes = pdf_path.read_bytes()
+def _render_pdf_preview(pdf_bytes: bytes, pdf_path: Path, request_id: str) -> None:
     pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
     st.markdown("### Vista previa de nomina")
     components.html(
         f"""
-        <div style=\"width:100%;\"> 
+        <div style=\"width:100%;\">
           <iframe
             id=\"nomina-preview\"
             src=\"data:application/pdf;base64,{pdf_b64}\"
@@ -232,17 +204,18 @@ def _render_public_sign_page(token_value: str) -> None:
         """,
         height=640,
     )
-
     st.download_button(
         "Descargar / ver nomina",
         data=pdf_bytes,
         file_name=pdf_path.name,
         mime="application/pdf",
-        key=f"download_pdf_{request['id']}",
+        key=f"download_pdf_{request_id}",
     )
 
+
+def _render_signature_canvas(request_id: str):
     st.markdown("### Firma manuscrita")
-    canvas_result = st_canvas(
+    return st_canvas(
         fill_color="rgba(255, 255, 255, 0)",
         stroke_width=2,
         stroke_color="#111111",
@@ -250,77 +223,102 @@ def _render_public_sign_page(token_value: str) -> None:
         height=220,
         width=520,
         drawing_mode="freedraw",
-        key=f"canvas_{request['id']}",
+        key=f"canvas_{request_id}",
     )
 
+
+def _handle_sign_submit(request: dict, canvas_result, pdf_path: Path) -> None:
     consent = st.checkbox("He revisado la nomina y confirmo mi firma", value=False)
-    if st.button("Confirmar firma", type="primary"):
-        if canvas_result.image_data is None:
-            st.error("Debes firmar antes de confirmar.")
-            return
-        if not consent:
-            st.error("Debes aceptar la confirmacion para continuar.")
-            return
+    if not st.button("Confirmar firma", type="primary"):
+        return
+    if canvas_result.image_data is None:
+        st.error("Debes firmar antes de confirmar.")
+        return
+    if not consent:
+        st.error("Debes aceptar la confirmacion para continuar.")
+        return
 
-        signature_dir = Path("data/signature_pdfs/signatures")
-        signed_dir = Path("data/signature_pdfs/signed")
-        signature_path = signature_dir / f"{request['id']}.png"
-        signed_pdf_path = signed_dir / f"{pdf_path.stem}-firmada.pdf"
+    signature_dir = Path("data/signature_pdfs/signatures")
+    signed_dir = Path("data/signature_pdfs/signed")
+    signature_path = signature_dir / f"{request['id']}.png"
+    signed_pdf_path = signed_dir / f"{pdf_path.stem}-firmada.pdf"
 
-        try:
-            signature_png_bytes = _save_signature_image(canvas_result.image_data, signature_path)
-            signed_dir.mkdir(parents=True, exist_ok=True)
-            insert_signature_into_pdf(
-                pdf_input_path=pdf_path,
-                signature_png_bytes=signature_png_bytes,
-                pdf_output_path=signed_pdf_path,
-                page_index=0,
-                x=350,
-                y=690,
-                width=180,
-                height=60,
-            )
+    try:
+        signature_png_bytes = _save_signature_image(canvas_result.image_data, signature_path)
+        signed_dir.mkdir(parents=True, exist_ok=True)
+        insert_signature_into_pdf(
+            pdf_input_path=pdf_path,
+            signature_png_bytes=signature_png_bytes,
+            pdf_output_path=signed_pdf_path,
+            page_index=0,
+            x=350,
+            y=690,
+            width=180,
+            height=60,
+        )
 
-            odoo_cfg = load_odoo_config_from_env_file()
-            client = OdooClient(
-                odoo_cfg["url"],
-                odoo_cfg["db"],
-                odoo_cfg["username"],
-                odoo_cfg["password"],
-            )
-            client.authenticate()
-            from core.odoo_attachments import upload_employee_payslip_attachment
+        odoo_cfg = load_odoo_config_from_env_file()
+        client = OdooClient(odoo_cfg["url"], odoo_cfg["db"], odoo_cfg["username"], odoo_cfg["password"])
+        client.authenticate()
+        upload_result = upload_employee_payslip_attachment(
+            odoo=client,
+            employee_id=int(request["employee_id_odoo"]),
+            filename=signed_pdf_path.name,
+            pdf_bytes=signed_pdf_path.read_bytes(),
+            month=int(request["period_month"]),
+            year=int(request["period_year"]),
+            duplicate_policy="replace",
+            dry_run=False,
+        )
 
-            upload_result = upload_employee_payslip_attachment(
-                odoo=client,
-                employee_id=int(request["employee_id_odoo"]),
-                filename=signed_pdf_path.name,
-                pdf_bytes=signed_pdf_path.read_bytes(),
-                month=int(request["period_month"]),
-                year=int(request["period_year"]),
-                duplicate_policy="replace",
-                dry_run=False,
-            )
+        mark_signed(request["id"])
+        mark_uploaded(request["id"], int(upload_result.get("attachment_id") or 0))
+        save_artifact(request["id"], str(signature_path), str(signed_pdf_path))
 
-            mark_signed(request["id"])
-            mark_uploaded(request["id"], int(upload_result.get("attachment_id") or 0))
-            save_artifact(request["id"], str(signature_path), str(signed_pdf_path))
+        deleted = delete_unsigned_attachment(
+            odoo=client,
+            employee_id=int(request["employee_id_odoo"]),
+            signed_filename=signed_pdf_path.name,
+        )
+        add_event(request["id"], "signed_and_uploaded", {"filename": signed_pdf_path.name, "unsigned_deleted": deleted})
+        st.rerun()
+    except Exception as exc:
+        mark_error(request["id"])
+        add_event(request["id"], "error", {"message": str(exc)})
+        st.error(f"No se pudo completar la firma/subida: {exc}")
 
-            deleted = delete_unsigned_attachment(
-                odoo=client,
-                employee_id=int(request["employee_id_odoo"]),
-                signed_filename=signed_pdf_path.name,
-            )
-            add_event(
-                request["id"],
-                "signed_and_uploaded",
-                {"filename": signed_pdf_path.name, "unsigned_deleted": deleted},
-            )
-            st.rerun()
-        except Exception as exc:
-            mark_error(request["id"])
-            add_event(request["id"], "error", {"message": str(exc)})
-            st.error(f"No se pudo completar la firma/subida: {exc}")
+
+def _render_public_sign_page(token_value: str) -> None:
+    st.title("Firma de nomina")
+    st.caption("Firma manuscrita desde movil")
+
+    hashed = token_hash(token_value)
+    request = get_request_by_token_hash(hashed)
+    if not request:
+        st.error("Enlace invalido o no existente.")
+        return
+    if is_expired(request["token_expires_at"]):
+        st.error("Enlace expirado. Contacta con RRHH.")
+        return
+    if request["status"] == "uploaded_odoo":
+        st.success("Esta nomina ya fue firmada y enviada correctamente.")
+        return
+
+    mark_opened(request["id"])
+    add_event(request["id"], "opened_link", {})
+
+    pdf_path = Path(request["pdf_original_path"])
+    if not pdf_path.exists():
+        st.error("No se encontro el PDF de nomina para esta solicitud.")
+        return
+
+    st.write(f"Empleado: {request['employee_name']}")
+    st.write(f"Periodo: {int(request['period_month']):02d}/{int(request['period_year'])}")
+
+    pdf_bytes = pdf_path.read_bytes()
+    _render_pdf_preview(pdf_bytes, pdf_path, request["id"])
+    canvas_result = _render_signature_canvas(request["id"])
+    _handle_sign_submit(request, canvas_result, pdf_path)
 
 
 query_token = st.query_params.get("token")
@@ -356,42 +354,36 @@ with st.sidebar:
 
     # B3 + A3 + A2 — Configuracion de cuentas por centro / departamento
     with st.expander("Configuracion de cuentas"):
-        st.markdown("**Centro → CCC (ultimos 3 digitos)**")
-        st.caption("375 → cuenta 46500 · 213 → cuenta 46510")
-        _n_ccc = int(st.number_input("Num. centros CCC", 0, 8, 2, step=1, key="n_ccc"))
-        center_ccc_config: dict[str, str] = _parse_kv_map(_env_cfg.get("center_ccc_map", ""))
-        for _i in range(_n_ccc):
-            _cc1, _cc2 = st.columns(2)
-            with _cc1:
-                _cn = st.text_input(f"Centro {_i+1}", key=f"ccc_c_{_i}", placeholder="Almacen Sevilla")
-            with _cc2:
-                _cv = st.text_input(f"CCC", key=f"ccc_v_{_i}", placeholder="375 o 213")
-            if _cn.strip() and _cv.strip():
-                center_ccc_config[_cn.strip()] = _cv.strip()
-
-        st.markdown("**Cuenta SS empresa por centro**")
-        _n_ss = int(st.number_input("Num. centros SS", 0, 8, 2, step=1, key="n_ss"))
-        ss_accounts_by_center: dict[str, str] = _parse_kv_map(_env_cfg.get("ss_account_map", ""))
-        for _i in range(_n_ss):
-            _sc1, _sc2 = st.columns(2)
-            with _sc1:
-                _sn = st.text_input(f"Centro SS {_i+1}", key=f"ss_c_{_i}", placeholder="Almacen Sevilla")
-            with _sc2:
-                _sv = st.text_input(f"Cuenta 642", key=f"ss_v_{_i}", placeholder="64200100")
-            if _sn.strip() and _sv.strip():
-                ss_accounts_by_center[_sn.strip()] = _sv.strip()
-
-        st.markdown("**Cuenta 640 por departamento**")
-        _n_dept = int(st.number_input("Num. departamentos", 0, 8, 2, step=1, key="n_dept"))
-        salary_account_by_dept: dict[str, str] = _parse_kv_map(_env_cfg.get("dept_640_map", ""))
-        for _i in range(_n_dept):
-            _dc1, _dc2 = st.columns(2)
-            with _dc1:
-                _dn = st.text_input(f"Departamento {_i+1}", key=f"dept_c_{_i}", placeholder="Almacen")
-            with _dc2:
-                _dv = st.text_input(f"Cuenta 640", key=f"dept_v_{_i}", placeholder="64000000")
-            if _dn.strip() and _dv.strip():
-                salary_account_by_dept[_dn.strip()] = _dv.strip()
+        center_ccc_config = _render_kv_map_inputs(
+            title="**Centro → CCC (ultimos 3 digitos)**",
+            caption="375 → cuenta 46500 · 213 → cuenta 46510",
+            n_label="Num. centros CCC",
+            n_key="n_ccc",
+            key_prefix="ccc",
+            placeholder_key="Almacen Sevilla",
+            placeholder_val="375 o 213",
+            initial=_parse_kv_map(_env_cfg.get("center_ccc_map", "")),
+        )
+        ss_accounts_by_center = _render_kv_map_inputs(
+            title="**Cuenta SS empresa por centro**",
+            caption="",
+            n_label="Num. centros SS",
+            n_key="n_ss",
+            key_prefix="ss",
+            placeholder_key="Almacen Sevilla",
+            placeholder_val="64200100",
+            initial=_parse_kv_map(_env_cfg.get("ss_account_map", "")),
+        )
+        salary_account_by_dept = _render_kv_map_inputs(
+            title="**Cuenta 640 por departamento**",
+            caption="",
+            n_label="Num. departamentos",
+            n_key="n_dept",
+            key_prefix="dept",
+            placeholder_key="Almacen",
+            placeholder_val="64000000",
+            initial=_parse_kv_map(_env_cfg.get("dept_640_map", "")),
+        )
 
     st.divider()
     st.markdown(
@@ -402,6 +394,33 @@ with st.sidebar:
         "4. Descarga el ZIP de nominas y el Excel de importacion Odoo.\n"
         "5. Conecta con Odoo y sube las nominas individuales."
     )
+
+
+def _render_kv_map_inputs(
+    title: str,
+    caption: str,
+    n_label: str,
+    n_key: str,
+    key_prefix: str,
+    placeholder_key: str,
+    placeholder_val: str,
+    initial: dict[str, str],
+) -> dict[str, str]:
+    """Render a pair of columns (key/value) N times and return the populated dict."""
+    st.markdown(title)
+    if caption:
+        st.caption(caption)
+    n = int(st.number_input(n_label, 0, 8, 2, step=1, key=n_key))
+    result = dict(initial)
+    for i in range(n):
+        c1, c2 = st.columns(2)
+        with c1:
+            k = st.text_input(f"{placeholder_key} {i+1}", key=f"{key_prefix}_k_{i}", placeholder=placeholder_key)
+        with c2:
+            v = st.text_input(placeholder_val, key=f"{key_prefix}_v_{i}", placeholder=placeholder_val)
+        if k.strip() and v.strip():
+            result[k.strip()] = v.strip()
+    return result
 
 
 def file_hash(data: bytes) -> str:

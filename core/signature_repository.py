@@ -21,6 +21,12 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db() -> None:
     conn = get_connection()
     try:
@@ -77,6 +83,14 @@ def init_db() -> None:
               ON signature_requests (token_hash)
             """
         )
+        # Migrations: safely add columns introduced after the initial schema
+        _add_column_if_missing(conn, "signature_requests", "worker_number", "TEXT")
+        _add_column_if_missing(conn, "signature_requests", "dni", "TEXT")
+        _add_column_if_missing(conn, "signature_requests", "employee_name", "TEXT")
+        _add_column_if_missing(conn, "signature_requests", "opened_at", "TEXT")
+        _add_column_if_missing(conn, "signature_requests", "signed_at", "TEXT")
+        _add_column_if_missing(conn, "signature_requests", "uploaded_at", "TEXT")
+        _add_column_if_missing(conn, "signature_requests", "odoo_attachment_id", "INTEGER")
         conn.commit()
     finally:
         conn.close()
