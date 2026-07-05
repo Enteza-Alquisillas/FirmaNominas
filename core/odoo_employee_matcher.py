@@ -37,7 +37,7 @@ def match_employees(
     worker_field: str | None,
     name_field: str = "name",
 ) -> list[OdooEmployeeMatch]:
-    base_fields = ["id", name_field, dni_field, "active", "department_id"]
+    base_fields = ["id", name_field, dni_field, "active", "department_id", "address_home_id"]
     if worker_field:
         all_employees = odoo.search_employees(
             [],
@@ -47,13 +47,34 @@ def match_employees(
     else:
         all_employees = odoo.search_employees([], fields=base_fields, limit=5000)
 
+    # El DNI del empleado (dni_field, p.ej. identification_id) casi nunca esta
+    # relleno en este Odoo; el DNI real vive en el contacto particular
+    # (address_home_id.vat). Se usa el del contacto como fuente principal y el
+    # del empleado como respaldo.
+    partner_ids = {
+        emp["address_home_id"][0]
+        for emp in all_employees
+        if isinstance(emp.get("address_home_id"), (list, tuple)) and emp["address_home_id"]
+    }
+    partner_vat_by_id: dict[int, str] = {}
+    if partner_ids:
+        partner_rows = odoo.search_read(
+            "res.partner", [("id", "in", list(partner_ids))], ["id", "vat"], limit=len(partner_ids)
+        )
+        partner_vat_by_id = {int(row["id"]): row["vat"] for row in partner_rows if row.get("vat")}
+
     employee_by_dni: dict[str, list[dict]] = {}
     employee_by_worker: dict[str, list[dict]] = {}
     employee_by_name: dict[str, list[dict]] = {}
 
     for emp in all_employees:
-        if dni_field and emp.get(dni_field):
-            norm = normalize_dni(str(emp[dni_field]))
+        addr = emp.get("address_home_id")
+        partner_id = addr[0] if isinstance(addr, (list, tuple)) and addr else None
+        contact_vat = partner_vat_by_id.get(partner_id) if partner_id else None
+
+        dni_source = contact_vat or (emp.get(dni_field) if dni_field else None)
+        if dni_source:
+            norm = normalize_dni(str(dni_source))
             employee_by_dni.setdefault(norm, []).append(emp)
 
         if worker_field and emp.get(worker_field):
